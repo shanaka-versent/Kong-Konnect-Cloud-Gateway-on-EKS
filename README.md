@@ -17,7 +17,7 @@ This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gatewa
 | Auto-scaling (Autopilot mode based on RPS) | ✅ |
 | Automatic upgrades with traffic shifting & rollback | ✅ |
 | CloudFront + WAF (DDoS, SQLi, XSS, rate limiting) | ✅ |
-| CloudFront bypass prevention (custom origin header) | ✅ |
+| CloudFront bypass prevention (origin mTLS + custom header) | ✅ |
 | Native Konnect Analytics | ✅ |
 | Dev Portal | ✅ |
 | Konnect UI, decK, Terraform | ✅ |
@@ -33,7 +33,7 @@ This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gatewa
 ```mermaid
 graph LR
     Client[Client] --> CF[CloudFront<br/>+ WAF]
-    CF -->|Custom Origin Header| KDP[Kong Cloud GW<br/>Kong's Infrastructure]
+    CF -->|mTLS + Origin Header| KDP[Kong Cloud GW<br/>Kong's Infrastructure]
     KDP -->|Config + Telemetry| KCP[Kong Konnect<br/>Control Plane]
     KDP -->|Transit Gateway| NLB_E[Internal NLBs<br/>Your VPC]
     NLB_E --> App1[App 1]
@@ -82,7 +82,7 @@ graph TB
         RAM[AWS RAM<br/>TGW Share]
     end
 
-    WAF -->|X-CF-Secret Header| K_NLB
+    WAF -->|mTLS + X-CF-Secret| K_NLB
     KDP1 & KDP2 & KDP3 -->|mTLS config| KCP
     KDP1 & KDP2 & KDP3 -->|Transit Gateway| TGW
     TGW --> NLB1 & NLB2 & NLB3 & NLB4
@@ -111,9 +111,9 @@ sequenceDiagram
 
     Client->>CF: Request (e.g., /api/users)
     Note over CF: WAF: SQLi/XSS/Rate check
-    CF->>KongNLB: Forward + X-CF-Secret header
+    CF->>KongNLB: Forward (mTLS + X-CF-Secret)
     KongNLB->>KongDP: Forward to DP pod
-    Note over KongDP: Verify X-CF-Secret<br/>Apply plugins (JWT, CORS)
+    Note over KongDP: Verify mTLS cert + X-CF-Secret<br/>Apply plugins (JWT, CORS)
     KongDP->>TGW: Route to EKS VPC CIDR
     TGW->>IntNLB: Forward to internal NLB
     IntNLB->>EKS: Forward to pod
@@ -371,8 +371,14 @@ deck gateway sync -s deck/kong.yaml \
 
 ### Step 7: Enable CloudFront Bypass Prevention (Optional)
 
-If you enabled CloudFront in Step 1, configure Kong to validate the custom origin header:
+If you enabled CloudFront in Step 1, bypass prevention ensures attackers can't hit Kong's public NLB directly to skip WAF.
 
+**Origin mTLS** (recommended — no Kong-side config needed):
+- If you passed `origin_mtls_certificate_arn` in Step 1, mTLS is already active.
+- CloudFront presents the client certificate during TLS handshake; Kong rejects connections without a valid cert.
+- Configure Kong Cloud Gateway to require client certificates (contact Kong support or configure via Konnect).
+
+**Custom origin header** (optional defense-in-depth):
 1. Edit `deck/kong.yaml` — uncomment the `pre-function` plugin
 2. Replace `<YOUR_CF_ORIGIN_SECRET>` with the same value used for `cf_origin_header_value`
 3. Re-sync to Konnect:
@@ -382,6 +388,8 @@ If you enabled CloudFront in Step 1, configure Kong to validate the custom origi
      --konnect-token $KONNECT_TOKEN \
      --konnect-control-plane-name kong-cloud-gateway-eks
    ```
+
+> **Tip:** mTLS alone is sufficient for bypass prevention. The custom header adds application-layer defense-in-depth but is not required if mTLS is enabled.
 
 ### Step 8: Test
 
@@ -403,7 +411,9 @@ curl -s $APP_URL/app2
 TOKEN=$(./scripts/02-generate-jwt.sh | grep "^ey")
 curl -s -H "Authorization: Bearer $TOKEN" $APP_URL/api/users | jq .
 
-# Verify CloudFront bypass prevention (should return 403)
+# Verify CloudFront bypass prevention
+# With mTLS: connection rejected (TLS handshake fails without client cert)
+# With custom header: returns 403 (missing X-CF-Secret)
 # curl -s "https://<kong-cloud-gw-proxy-url>/healthz"
 ```
 
@@ -472,7 +482,7 @@ aws cloudwatch get-metric-statistics \
   --statistics Sum
 
 # Verify CloudFront bypass prevention
-# Direct to Kong (should fail with 403 if pre-function is enabled):
+# Direct to Kong (mTLS: TLS handshake fails; custom header: returns 403):
 curl -s "https://<kong-cloud-gw-proxy-url>/healthz"
 
 # Via CloudFront (should succeed):
