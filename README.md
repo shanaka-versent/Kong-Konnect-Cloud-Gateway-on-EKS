@@ -10,24 +10,6 @@ This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gatewa
 
 > **Note:** There are no Kubernetes `Ingress` resources, Gateway API CRDs, or service mesh in this pattern. All L7 API gateway logic (routing, authentication, rate limiting) is handled by Kong Cloud Gateway outside the cluster. The **AWS Load Balancer Controller** is installed in the cluster and operates in its **L4 service controller mode** — it watches for `Service type: LoadBalancer` resources and provisions internal NLBs via the AWS API. It is not used in its L7 ingress mode (no `Ingress` or `IngressClass` resources exist). No traffic flows through the controller itself; it's purely control plane automation that keeps NLB target groups in sync with pod IPs.
 
-## What You Get
-
-| Feature | Available |
-|---------|-----------|
-| Fully managed Kong data plane (Kong operates it) | ✅ |
-| 99.99% SLA | ✅ |
-| Auto-scaling (Autopilot mode based on RPS) | ✅ |
-| Automatic upgrades with traffic shifting & rollback | ✅ |
-| CloudFront + WAF (DDoS, SQLi, XSS, rate limiting) | ✅ |
-| CloudFront bypass prevention (origin mTLS + custom header) | ✅ |
-| Native Konnect Analytics | ✅ |
-| Dev Portal | ✅ |
-| Konnect UI, decK, Terraform | ✅ |
-| 200+ Kong Plugins | ✅ |
-| PCI DSS 4.0 & SOC 2 compliance | ✅ |
-| Kubernetes Gateway API | ❌ |
-| Self-managed data plane in your cluster | ❌ |
-
 ## Architecture
 
 ### High-Level Traffic Flow
@@ -197,49 +179,6 @@ graph TB
 | WAF | AWS WAF on CloudFront | AWS WAF on CloudFront |
 | SLA | Your responsibility | 99.99% from Kong |
 
-## Repository Structure
-
-```
-Kong-Konnect-Cloud-Gateway-on-EKS/
-├── terraform/                    # AWS Infrastructure
-│   ├── main.tf                   # VPC, EKS, Transit Gateway, CloudFront, ArgoCD
-│   ├── variables.tf              # Configurable parameters
-│   ├── outputs.tf                # Transit GW ID, CloudFront URL, etc.
-│   ├── providers.tf              # AWS provider config (incl. us-east-1 for WAF)
-│   └── modules/
-│       ├── vpc/                  # VPC, subnets, NAT gateway
-│       ├── eks/                  # EKS cluster, node groups
-│       ├── iam/                  # IAM roles for LB controller
-│       ├── lb-controller/        # AWS LB Controller (creates internal NLBs)
-│       ├── cloudfront/           # CloudFront + WAF (edge security)
-│       └── argocd/               # ArgoCD installation
-│
-├── argocd/apps/                  # ArgoCD Applications
-│   ├── root-app.yaml             # App-of-Apps root
-│   ├── 04-gateway-health.yaml    # Health responder
-│   ├── 05-tenant-app1.yaml       # Sample app 1
-│   ├── 06-tenant-app2.yaml       # Sample app 2
-│   └── 07-users-api.yaml         # Users API backend
-│
-├── k8s/                          # Kubernetes Manifests
-│   ├── apps/
-│   │   ├── api/                  # Users API (deployment, internal NLB service)
-│   │   ├── tenant-app1/          # App 1 (deployment, internal NLB service)
-│   │   └── tenant-app2/          # App 2 (deployment, internal NLB service)
-│   └── gateway-health/           # Health responder (deployment, internal NLB service)
-│
-├── deck/
-│   └── kong.yaml                 # decK config (routes, plugins, consumers, CF bypass)
-│
-├── scripts/
-│   ├── 01-setup-cloud-gateway.sh # Create Cloud GW, attach Transit Gateway
-│   ├── 02-generate-jwt.sh        # Generate JWT token for testing
-│   ├── 03-post-terraform-setup.sh # Display NLB endpoints and setup instructions
-│   └── destroy.sh                # Teardown EKS stack
-│
-└── docs/images/                  # Documentation images
-```
-
 ## Prerequisites
 
 - **AWS CLI** configured with appropriate credentials
@@ -316,7 +255,7 @@ ArgoCD deploys backend services, each with a `Service type: LoadBalancer` (inter
 - `sample-app-2` → Internal NLB
 - `health-responder` → Internal NLB
 
-### Step 3: Get Internal NLB Endpoints
+Once all applications are synced, get the internal NLB DNS names — you'll need them for Konnect service configuration:
 
 ```bash
 ./scripts/03-post-terraform-setup.sh
@@ -325,9 +264,7 @@ ArgoCD deploys backend services, each with a `Service type: LoadBalancer` (inter
 kubectl get svc -A -o wide | grep LoadBalancer
 ```
 
-Note the internal NLB DNS names — you'll need them for Konnect service configuration.
-
-### Step 4: Set Up Kong Cloud Gateway
+### Step 3: Set Up Kong Cloud Gateway (Konnect)
 
 ```bash
 export KONNECT_REGION="au"
@@ -347,7 +284,7 @@ This script:
 
 **Alternative:** Use the Konnect UI (Gateway Manager → Create → Dedicated Cloud Gateway) or the [Konnect Terraform provider](https://registry.terraform.io/providers/Kong/konnect/latest).
 
-### Step 5: Accept Transit Gateway Attachment
+### Step 4: Accept Transit Gateway Attachment
 
 After the Cloud Gateway network is provisioned:
 
@@ -356,7 +293,7 @@ After the Cloud Gateway network is provisioned:
 3. **Accept** the attachment
 4. Verify routes in the Transit Gateway route table
 
-### Step 6: Configure Routes in Konnect
+### Step 5: Configure Routes in Konnect
 
 Update `deck/kong.yaml` with the actual internal NLB DNS names:
 
@@ -376,7 +313,7 @@ deck gateway sync -s deck/kong.yaml \
   --konnect-control-plane-name kong-cloud-gateway-eks
 ```
 
-### Step 7: Enable CloudFront Bypass Prevention (Optional)
+### Step 6: Enable CloudFront Bypass Prevention (Optional)
 
 If you enabled CloudFront in Step 1, bypass prevention ensures attackers can't hit Kong's public NLB directly to skip WAF.
 
@@ -398,7 +335,7 @@ If you enabled CloudFront in Step 1, bypass prevention ensures attackers can't h
 
 > **Tip:** mTLS alone is sufficient for bypass prevention. The custom header adds application-layer defense-in-depth but is not required if mTLS is enabled.
 
-### Step 8: Test
+### Step 7: Test
 
 ```bash
 # Get the application URL
@@ -424,19 +361,9 @@ curl -s -H "Authorization: Bearer $TOKEN" $APP_URL/api/users | jq .
 # curl -s "https://<kong-cloud-gw-proxy-url>/healthz"
 ```
 
-## API Observability
+## Observability & Troubleshooting
 
-With Dedicated Cloud Gateway, the **telemetry subsystem is fully active**. All metrics flow to Konnect automatically:
-
-- **Request volume** — Total requests per route/service
-- **Latency** — P50, P95, P99 histograms
-- **Status codes** — Success/error rate breakdown
-- **Bandwidth** — Ingress/egress bytes
-- **Consumer analytics** — Per-consumer patterns
-
-View analytics: https://cloud.konghq.com → Analytics
-
-## Troubleshooting
+With Dedicated Cloud Gateway, the telemetry subsystem is fully active — all metrics (request volume, latency P50/P95/P99, status codes, bandwidth, consumer analytics) flow to Konnect automatically. View at: https://cloud.konghq.com → Analytics
 
 ### Transit Gateway Connectivity
 
@@ -464,6 +391,28 @@ kubectl get pods -n kube-system | grep aws-load-balancer
 # - Check service annotations are correct
 kubectl describe svc users-api -n api
 ```
+
+### ArgoCD Application Status
+
+```bash
+# Check all ArgoCD applications
+kubectl get applications -n argocd
+
+# Check a specific application
+kubectl get app users-api -n argocd -o yaml
+```
+
+**Access ArgoCD UI:**
+
+```bash
+# Port-forward the ArgoCD server
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+# Get the initial admin password
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+```
+
+Then open https://localhost:8080 in your browser. Login with username `admin` and the password from the command above.
 
 ### Kong Cloud Gateway Status
 
