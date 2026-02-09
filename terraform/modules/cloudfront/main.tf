@@ -6,30 +6,37 @@
 # This module creates a CloudFront distribution with:
 # - WAF Web ACL with AWS Managed Rules (SQLi, XSS, Bad Inputs, Rate Limiting)
 # - Security response headers (HSTS, X-Frame-Options, X-Content-Type-Options)
-# - Custom origin header for CloudFront bypass prevention
+# - CloudFront bypass prevention via mTLS and/or custom origin header
 # - Optional S3 origin for static assets with Origin Access Control (OAC)
 #
 # Architecture:
 # Client --> CloudFront (WAF) --> Kong Cloud Gateway NLB (Kong's VPC) --> Kong DP --> Transit GW --> EKS
 #
-# CloudFront Bypass Prevention:
-# Since Kong Cloud Gateway runs in Kong's managed infrastructure with a public
-# NLB, we cannot use VPC Origin for private connectivity. Instead, we use a
-# custom origin header (X-CF-Secret) that CloudFront injects on every request.
-# A Kong request-validator plugin on the Cloud Gateway verifies this header
-# and rejects direct-to-origin requests that bypass CloudFront.
+# CloudFront Bypass Prevention (two layers, either or both):
+#
+# 1. Origin mTLS (recommended, strongest):
+#    CloudFront presents a client certificate during TLS handshake with Kong's
+#    origin. Kong Cloud Gateway validates the certificate and rejects connections
+#    without it. This is cryptographic proof of CloudFront's identity.
+#    Requires: ACM-imported certificate in us-east-1 with clientAuth EKU.
+#    Launched: AWS CloudFront origin mTLS (January 2026).
+#
+# 2. Custom origin header (application-layer fallback):
+#    CloudFront injects X-CF-Secret on every request. A Kong pre-function plugin
+#    validates the header and rejects direct-to-origin requests.
 #
 # Security model:
 # 1. WAF filters malicious traffic at the edge
-# 2. Custom origin header prevents CloudFront bypass
-# 3. Kong plugins provide application-layer security (JWT, rate-limiting, CORS)
-# 4. Transit Gateway provides private connectivity to backend services
+# 2. Origin mTLS provides cryptographic bypass prevention
+# 3. Custom origin header provides application-layer bypass prevention
+# 4. Kong plugins provide API security (JWT, rate-limiting, CORS)
+# 5. Transit Gateway provides private connectivity to backend services
 
 terraform {
   required_providers {
     aws = {
       source                = "hashicorp/aws"
-      version               = ">= 5.0"
+      version               = ">= 5.82" # Required for origin mTLS support
       configuration_aliases = [aws.us_east_1]
     }
   }
@@ -273,8 +280,15 @@ resource "aws_cloudfront_distribution" "main" {
   #
   # Kong's Dedicated Cloud Gateway provides a public proxy URL
   # (e.g., <prefix>.au.kong-cloud.com). CloudFront connects to this
-  # over HTTPS. A custom origin header (X-CF-Secret) is injected to
-  # prevent CloudFront bypass — Kong validates this header via plugin.
+  # over HTTPS with two layers of bypass prevention:
+  #
+  # Layer 1 (mTLS): CloudFront presents a client certificate during TLS
+  #   handshake. Kong validates the cert → rejects non-CloudFront connections.
+  #   Strongest protection — cryptographic proof of identity.
+  #
+  # Layer 2 (Header): CloudFront injects X-CF-Secret header. A Kong
+  #   pre-function plugin validates it → rejects requests without it.
+  #   Application-layer defense-in-depth.
   # ---------------------------------------------------------------------------
   origin {
     domain_name = var.kong_cloud_gateway_domain
@@ -289,12 +303,24 @@ resource "aws_cloudfront_distribution" "main" {
       origin_keepalive_timeout = 5
     }
 
-    # CloudFront bypass prevention: Custom origin header
-    # Kong Cloud Gateway must verify this header via a request-validator
-    # or pre-function plugin and reject requests without it.
-    custom_header {
-      name  = var.cf_origin_header_name
-      value = var.cf_origin_header_value
+    # Origin mTLS — CloudFront presents client certificate to Kong origin
+    # Requires ACM certificate in us-east-1 with EKU=clientAuth
+    # Kong Cloud Gateway must be configured to require client certificates
+    dynamic "origin_mtls_config" {
+      for_each = var.origin_mtls_certificate_arn != "" ? [1] : []
+      content {
+        client_certificate_arn = var.origin_mtls_certificate_arn
+      }
+    }
+
+    # Custom origin header — application-layer bypass prevention
+    # Kong pre-function plugin validates this header
+    dynamic "custom_header" {
+      for_each = var.cf_origin_header_value != "" ? [1] : []
+      content {
+        name  = var.cf_origin_header_name
+        value = var.cf_origin_header_value
+      }
     }
   }
 

@@ -124,27 +124,40 @@ sequenceDiagram
 
 ### CloudFront Bypass Prevention
 
-Kong Cloud Gateway has a public NLB. Without protection, attackers could bypass CloudFront/WAF by hitting Kong's proxy URL directly. This repo implements the **custom origin header** approach:
+Kong Cloud Gateway has a public NLB. Without protection, attackers could bypass CloudFront/WAF by hitting Kong's proxy URL directly. This repo implements **two layers** of bypass prevention — either or both can be enabled:
 
 ```mermaid
 graph LR
-    subgraph "Allowed"
-        A1[Client] --> A2[CloudFront<br/>injects X-CF-Secret] --> A3[Kong Cloud GW<br/>validates header ✅]
+    subgraph "Allowed (mTLS + Header)"
+        A1[Client] --> A2[CloudFront<br/>client cert + X-CF-Secret] --> A3[Kong Cloud GW<br/>cert valid ✅ header valid ✅]
     end
 
     subgraph "Blocked"
-        B1[Attacker] -->|Direct access| B3[Kong Cloud GW<br/>no header → 403 ❌]
+        B1[Attacker] -->|Direct access| B3[Kong Cloud GW<br/>no cert → TLS rejected ❌]
     end
 
     style A3 fill:#2d8659,color:#fff
     style B3 fill:#cc3333,color:#fff
 ```
 
-| Technique | Implementation | Status |
-|-----------|---------------|--------|
-| **Custom origin header** | CloudFront injects `X-CF-Secret`, Kong pre-function validates it | ✅ Implemented |
-| **IP allowlisting** | Kong Cloud Gateway provides static egress IPs for allowlisting | ℹ️ Optional (contact Kong) |
-| **mTLS** | Client certificate between CloudFront and Kong origin | ℹ️ Not supported by CloudFront custom origins |
+| Technique | How It Works | Status |
+|-----------|-------------|--------|
+| **Origin mTLS** (recommended) | CloudFront presents client certificate during TLS handshake; Kong rejects connections without valid cert. Cryptographic proof of identity. | ✅ Implemented |
+| **Custom origin header** | CloudFront injects `X-CF-Secret`; Kong `pre-function` plugin validates it and returns 403 if missing. Application-layer shared secret. | ✅ Implemented |
+| **IP allowlisting** | Kong Cloud Gateway provides static egress NAT IPs for allowlisting | ℹ️ Optional (contact Kong) |
+
+> **Recommendation:** Use **origin mTLS** — it's the strongest option (cryptographic, not a shared secret). The custom header is optional defense-in-depth. mTLS alone is sufficient for bypass prevention.
+
+#### Origin mTLS Setup
+
+1. Create a private CA (AWS Private CA or third-party)
+2. Issue a client certificate with **Extended Key Usage = clientAuth**
+3. Import the certificate into ACM in **us-east-1**
+4. Pass the certificate ARN to Terraform:
+   ```bash
+   terraform apply -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123"
+   ```
+5. Configure Kong Cloud Gateway to require client certificates (contact Kong support or configure via Konnect)
 
 ### What's Different from Self-Hosted Kong
 
@@ -173,7 +186,7 @@ graph TB
 | Scaling | Manual (HPA, node scaling) | Autopilot (auto-scales on RPS) |
 | Upgrades | Manual (Helm rolling updates) | Automatic with traffic shifting |
 | Network path | CloudFront → VPC Origin → NLB → Kong (private) | CloudFront → Kong NLB (public) → Transit GW → NLB |
-| CF bypass prevention | Not needed (VPC Origin = private) | Custom origin header (X-CF-Secret) |
+| CF bypass prevention | Not needed (VPC Origin = private) | Origin mTLS (recommended) + custom header (optional) |
 | WAF | AWS WAF on CloudFront | AWS WAF on CloudFront |
 | SLA | Your responsibility | 99.99% from Kong |
 
@@ -255,13 +268,32 @@ This creates:
 - **AWS Transit Gateway** + RAM share (for Kong Cloud Gateway connectivity)
 - ArgoCD installation
 
-To enable CloudFront + WAF:
+To enable CloudFront + WAF with **origin mTLS** (recommended):
 
 ```bash
 terraform apply \
   -var="enable_cloudfront=true" \
   -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
-  -var="cf_origin_header_value=my-super-secret-origin-value-$(openssl rand -hex 16)"
+  -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123"
+```
+
+Or with **custom origin header** (simpler, application-layer):
+
+```bash
+terraform apply \
+  -var="enable_cloudfront=true" \
+  -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
+  -var="cf_origin_header_value=$(openssl rand -hex 32)"
+```
+
+Or **both** (defense-in-depth):
+
+```bash
+terraform apply \
+  -var="enable_cloudfront=true" \
+  -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
+  -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123" \
+  -var="cf_origin_header_value=$(openssl rand -hex 32)"
 ```
 
 ### Step 2: Deploy Backend Services (ArgoCD)

@@ -21,15 +21,17 @@ _format_version: "3.0"
 
 plugins:
   # --------------------------------------------------------------------------
-  # CloudFront Bypass Prevention (Optional — enable when using CloudFront)
+  # CloudFront Bypass Prevention — Custom Origin Header (Optional)
   # --------------------------------------------------------------------------
-  # This pre-function plugin verifies the custom origin header injected by
-  # CloudFront. Requests without the correct header are rejected with 403.
+  # NOTE: If you're using origin mTLS (recommended), this plugin is OPTIONAL.
+  # mTLS alone prevents bypass at the TLS layer (Kong rejects connections
+  # without a valid client certificate). This header adds defense-in-depth
+  # at the application layer.
   #
-  # How it works:
-  # 1. CloudFront injects X-CF-Secret header on every request to Kong origin
-  # 2. This plugin checks for the header and validates the secret value
-  # 3. Requests hitting Kong directly (bypassing CloudFront) are blocked
+  # The pre-function plugin verifies the custom origin header injected by
+  # CloudFront. Requests without the correct header are rejected with 403.
+  # The overhead is negligible — a single header check per request in Lua
+  # with no external I/O, no state, and no rate limit concerns.
   #
   # To enable:
   # 1. Uncomment the plugin below

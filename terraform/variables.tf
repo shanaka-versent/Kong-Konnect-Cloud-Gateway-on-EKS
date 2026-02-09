@@ -120,7 +120,11 @@ variable "enable_logging" {
 # ==============================================================================
 # Places CloudFront + WAF in front of Kong Cloud Gateway's public proxy URL.
 # Provides DDoS protection, SQLi/XSS filtering, rate limiting, and geo-blocking.
-# Custom origin header prevents CloudFront bypass.
+#
+# CloudFront bypass prevention (two layers):
+# 1. Origin mTLS (strongest): CloudFront presents client cert to Kong origin
+# 2. Custom origin header: Kong pre-function validates X-CF-Secret header
+# Either or both can be enabled. mTLS alone is sufficient for bypass prevention.
 
 variable "enable_cloudfront" {
   description = "Enable CloudFront + WAF in front of Kong Cloud Gateway"
@@ -134,7 +138,14 @@ variable "kong_cloud_gateway_domain" {
   default     = ""
 }
 
-# CloudFront bypass prevention
+# CloudFront bypass prevention — Layer 1: Origin mTLS (recommended)
+variable "origin_mtls_certificate_arn" {
+  description = "ACM certificate ARN for CloudFront origin mTLS (must be in us-east-1, with EKU=clientAuth). Empty = disabled."
+  type        = string
+  default     = ""
+}
+
+# CloudFront bypass prevention — Layer 2: Custom origin header
 variable "cf_origin_header_name" {
   description = "Custom header name for CloudFront bypass prevention"
   type        = string
@@ -142,7 +153,7 @@ variable "cf_origin_header_name" {
 }
 
 variable "cf_origin_header_value" {
-  description = "Secret value for the custom origin header. Must match the value configured in Kong pre-function plugin."
+  description = "Secret value for the custom origin header. Empty = disabled. Must match Kong pre-function plugin."
   type        = string
   default     = ""
   sensitive   = true

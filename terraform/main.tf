@@ -225,16 +225,21 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 # - CloudFront edge caching for static assets (optional)
 # - Custom domain with ACM certificate
 #
-# CloudFront Bypass Prevention:
-# CloudFront injects a custom origin header (X-CF-Secret) on every request.
-# A Kong pre-function or request-validator plugin verifies this header and
-# rejects direct-to-origin requests. This prevents attackers from bypassing
-# CloudFront/WAF by hitting Kong's proxy URL directly.
+# CloudFront Bypass Prevention (two layers, either or both):
 #
-# After terraform apply:
-# 1. Copy the cf_origin_secret output value
-# 2. Add it to the Kong pre-function plugin in deck/kong.yaml
-# 3. Sync the config: deck gateway sync -s deck/kong.yaml ...
+# 1. Origin mTLS (recommended, strongest):
+#    CloudFront presents a client certificate during TLS handshake with Kong.
+#    Kong validates the cert → rejects non-CloudFront connections.
+#    Requires: ACM certificate in us-east-1 with clientAuth EKU.
+#
+# 2. Custom origin header (application-layer):
+#    CloudFront injects X-CF-Secret. Kong pre-function validates it.
+#    Simpler but weaker (shared secret).
+#
+# After terraform apply (if using custom header):
+# 1. Edit deck/kong.yaml — uncomment the pre-function plugin
+# 2. Set the secret value matching cf_origin_header_value
+# 3. Sync: deck gateway sync -s deck/kong.yaml ...
 
 module "cloudfront" {
   count  = var.enable_cloudfront ? 1 : 0
@@ -250,7 +255,10 @@ module "cloudfront" {
   # Kong Cloud Gateway proxy URL (set after Cloud GW is provisioned)
   kong_cloud_gateway_domain = var.kong_cloud_gateway_domain
 
-  # CloudFront bypass prevention — custom origin header
+  # CloudFront bypass prevention — Layer 1: Origin mTLS
+  origin_mtls_certificate_arn = var.origin_mtls_certificate_arn
+
+  # CloudFront bypass prevention — Layer 2: Custom origin header
   cf_origin_header_name  = var.cf_origin_header_name
   cf_origin_header_value = var.cf_origin_header_value
 

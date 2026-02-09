@@ -12,16 +12,40 @@ variable "kong_cloud_gateway_domain" {
   type        = string
 }
 
+# ===========================================================================
 # CloudFront Bypass Prevention
+# ===========================================================================
+# Two mechanisms, either or both can be enabled:
+#
+# 1. Origin mTLS (strongest — cryptographic):
+#    CloudFront presents a client certificate to Kong origin during TLS
+#    handshake. Kong validates the cert and rejects non-CF connections.
+#    Requires ACM certificate in us-east-1 with EKU=clientAuth.
+#
+# 2. Custom origin header (application-layer):
+#    CloudFront injects a secret header, Kong pre-function validates it.
+#    Simpler to set up but weaker (shared secret, not cryptographic).
+#
+# Recommendation: Use mTLS. Add the header as defense-in-depth if desired.
+
+# --- Origin mTLS (Layer 1) ---
+variable "origin_mtls_certificate_arn" {
+  description = "ACM certificate ARN for origin mTLS (must be in us-east-1, with EKU=clientAuth). Empty string disables mTLS."
+  type        = string
+  default     = ""
+}
+
+# --- Custom origin header (Layer 2) ---
 variable "cf_origin_header_name" {
-  description = "Custom header name injected by CloudFront for origin verification (CloudFront bypass prevention)"
+  description = "Custom header name injected by CloudFront for origin verification"
   type        = string
   default     = "X-CF-Secret"
 }
 
 variable "cf_origin_header_value" {
-  description = "Secret value for the custom origin header. Kong Cloud Gateway validates this via a pre-function or request-validator plugin."
+  description = "Secret value for the custom origin header. Empty string disables the header. Kong pre-function plugin validates this."
   type        = string
+  default     = ""
   sensitive   = true
 }
 
