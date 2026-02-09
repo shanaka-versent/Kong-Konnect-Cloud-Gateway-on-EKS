@@ -6,7 +6,9 @@ This POC demonstrates how to use **Kong Konnect Dedicated Cloud Gateways** with 
 
 My previous POCs implemented API gateways using [Istio on EKS](https://github.com/shanaka-versent/EKS-Istio-GatewayAPI-Deom/tree/k8s-gateway-api-poc), [Kong with K8s Gateway API](https://github.com/shanaka-versent/EKS-Kong-GatewayAPI-Demo), and [Kong with Konnect as source](https://github.com/shanaka-versent/Kong-Konnect-Gateway-on-EKS). All of those required running Kong or Istio data plane pods inside the EKS cluster.
 
-This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gateway handles all API gateway infrastructure. You deploy backend services in EKS, expose them via internal NLBs, and connect Kong to them through an AWS Transit Gateway. CloudFront + WAF sits at the edge for DDoS protection, SQLi/XSS filtering, and rate limiting.
+This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gateway handles all API gateway infrastructure. You deploy backend services in EKS, expose them via internal NLBs (created by the AWS Load Balancer Controller), and connect Kong to them through an AWS Transit Gateway. CloudFront + WAF sits at the edge for DDoS protection, SQLi/XSS filtering, and rate limiting.
+
+> **Note:** There is no Kubernetes Ingress controller, Gateway API, or service mesh in this pattern. All north-south API gateway logic (routing, authentication, rate limiting) is handled by Kong Cloud Gateway outside the cluster. The AWS Load Balancer Controller is not an ingress controller — it's a Kubernetes operator that watches for `Service type: LoadBalancer` resources and provisions AWS NLBs via the AWS API. No traffic flows through the controller itself; it's purely control plane automation.
 
 ## What You Get
 
@@ -72,11 +74,13 @@ graph TB
         TGW[AWS Transit Gateway]
         subgraph "Your VPC (10.0.0.0/16)"
             subgraph "EKS Cluster"
+                LBC[AWS LB Controller<br/>provisions NLBs]
                 NLB1[Internal NLB<br/>users-api]
                 NLB2[Internal NLB<br/>app1]
                 NLB3[Internal NLB<br/>app2]
                 NLB4[Internal NLB<br/>health]
                 ArgoCD[ArgoCD]
+                LBC -.->|creates & manages| NLB1 & NLB2 & NLB3 & NLB4
             end
         end
         RAM[AWS RAM<br/>TGW Share]
@@ -95,6 +99,7 @@ graph TB
     style KDP2 fill:#003459,color:#fff
     style KDP3 fill:#003459,color:#fff
     style TGW fill:#ff9900,color:#000
+    style LBC fill:#ff9900,color:#000
 ```
 
 ### Network Connectivity
@@ -183,9 +188,11 @@ graph TB
 |--------|----------------------------|---------------------------|
 | Kong DP runs in | Your EKS cluster | Kong's managed infrastructure |
 | You manage | Everything (infra + Kong + apps) | Only backend apps in EKS |
+| K8s ingress/gateway | None (Kong DP pods in cluster) | None (no ingress controller needed) |
+| Service exposure | ClusterIP (Kong DP in same cluster) | `Service type: LoadBalancer` → internal NLBs via AWS LB Controller |
 | Scaling | Manual (HPA, node scaling) | Autopilot (auto-scales on RPS) |
 | Upgrades | Manual (Helm rolling updates) | Automatic with traffic shifting |
-| Network path | CloudFront → VPC Origin → NLB → Kong (private) | CloudFront → Kong NLB (public) → Transit GW → NLB |
+| Network path | CloudFront → VPC Origin → NLB → Kong (private) | CloudFront → Kong NLB (public) → Transit GW → internal NLBs |
 | CF bypass prevention | Not needed (VPC Origin = private) | Origin mTLS (recommended) + custom header (optional) |
 | WAF | AWS WAF on CloudFront | AWS WAF on CloudFront |
 | SLA | Your responsibility | 99.99% from Kong |
@@ -264,7 +271,7 @@ terraform apply
 This creates:
 - VPC with public/private subnets across 2 AZs
 - EKS cluster with managed node groups
-- AWS Load Balancer Controller (for internal NLBs)
+- AWS Load Balancer Controller — watches K8s Services and provisions internal NLBs (L4 only, not an ingress controller)
 - **AWS Transit Gateway** + RAM share (for Kong Cloud Gateway connectivity)
 - ArgoCD installation
 
@@ -303,7 +310,7 @@ kubectl apply -f argocd/apps/root-app.yaml
 kubectl get applications -n argocd -w
 ```
 
-ArgoCD deploys backend services, each exposed via an **internal NLB**:
+ArgoCD deploys backend services, each with a `Service type: LoadBalancer` (internal NLB annotation). The AWS Load Balancer Controller automatically provisions an internal NLB per service and registers pod IPs as targets:
 - `users-api` → Internal NLB
 - `sample-app-1` → Internal NLB
 - `sample-app-2` → Internal NLB
