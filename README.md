@@ -8,7 +8,7 @@ My previous POCs implemented API gateways using [Istio on EKS](https://github.co
 
 This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gateway handles all API gateway infrastructure. You deploy backend services in EKS, expose them via internal NLBs (created by the AWS Load Balancer Controller), and connect Kong to them through an AWS Transit Gateway. CloudFront + WAF sits at the edge for DDoS protection, SQLi/XSS filtering, and rate limiting.
 
-> **Note:** There is no Kubernetes Ingress controller, Gateway API, or service mesh in this pattern. All north-south API gateway logic (routing, authentication, rate limiting) is handled by Kong Cloud Gateway outside the cluster. The AWS Load Balancer Controller is not an ingress controller — it's a Kubernetes operator that watches for `Service type: LoadBalancer` resources and provisions AWS NLBs via the AWS API. No traffic flows through the controller itself; it's purely control plane automation.
+> **Note:** There are no Kubernetes `Ingress` resources, Gateway API CRDs, or service mesh in this pattern. All L7 API gateway logic (routing, authentication, rate limiting) is handled by Kong Cloud Gateway outside the cluster. The **AWS Load Balancer Controller** is installed in the cluster and operates in its **L4 service controller mode** — it watches for `Service type: LoadBalancer` resources and provisions internal NLBs via the AWS API. It is not used in its L7 ingress mode (no `Ingress` or `IngressClass` resources exist). No traffic flows through the controller itself; it's purely control plane automation that keeps NLB target groups in sync with pod IPs.
 
 ## What You Get
 
@@ -188,7 +188,7 @@ graph TB
 |--------|----------------------------|---------------------------|
 | Kong DP runs in | Your EKS cluster | Kong's managed infrastructure |
 | You manage | Everything (infra + Kong + apps) | Only backend apps in EKS |
-| K8s ingress/gateway | None (Kong DP pods in cluster) | None (no ingress controller needed) |
+| K8s ingress/gateway | None (Kong DP pods in cluster) | AWS LB Controller (L4 only — no `Ingress` or Gateway API resources) |
 | Service exposure | ClusterIP (Kong DP in same cluster) | `Service type: LoadBalancer` → internal NLBs via AWS LB Controller |
 | Scaling | Manual (HPA, node scaling) | Autopilot (auto-scales on RPS) |
 | Upgrades | Manual (Helm rolling updates) | Automatic with traffic shifting |
@@ -271,7 +271,7 @@ terraform apply
 This creates:
 - VPC with public/private subnets across 2 AZs
 - EKS cluster with managed node groups
-- AWS Load Balancer Controller — watches K8s Services and provisions internal NLBs (L4 only, not an ingress controller)
+- AWS Load Balancer Controller — operates in L4 mode, watches `Service type: LoadBalancer` and provisions internal NLBs (no L7 `Ingress` resources used)
 - **AWS Transit Gateway** + RAM share (for Kong Cloud Gateway connectivity)
 - ArgoCD installation
 
