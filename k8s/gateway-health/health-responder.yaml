@@ -1,0 +1,112 @@
+# Health Responder Service
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# Handles health probes from Kong Cloud Gateway.
+# The /healthz route is configured in Konnect to forward here.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: health-responder-config
+  namespace: gateway-health
+data:
+  default.conf: |
+    server {
+        listen 8080;
+        server_name _;
+        access_log off;
+
+        location /healthz {
+            default_type text/plain;
+            return 200 'healthy\n';
+        }
+
+        location /healthz/ready {
+            default_type text/plain;
+            return 200 'ready\n';
+        }
+
+        location /healthz/live {
+            default_type text/plain;
+            return 200 'live\n';
+        }
+
+        location / {
+            default_type text/plain;
+            return 200 'ok\n';
+        }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: health-responder
+  namespace: gateway-health
+  labels:
+    app: health-responder
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: health-responder
+  template:
+    metadata:
+      labels:
+        app: health-responder
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: health-responder-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: health-responder
+  namespace: gateway-health
+  labels:
+    app: health-responder
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+  selector:
+    app: health-responder

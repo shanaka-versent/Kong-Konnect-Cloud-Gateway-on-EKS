@@ -1,0 +1,8 @@
+# Gateway Health Namespace
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-health
+  labels:
+    app.kubernetes.io/name: gateway-health

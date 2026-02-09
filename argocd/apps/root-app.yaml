@@ -1,0 +1,34 @@
+# ArgoCD Root Application (App of Apps Pattern)
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# This root application manages all other ArgoCD applications.
+# Apply this after Terraform deployment to bootstrap the cluster.
+# 
+# Note: Kong data plane runs in Kong's managed infrastructure (Cloud Gateway).
+# This cluster only hosts backend services exposed via internal NLBs.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cloud-gateway-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
+    targetRevision: HEAD
+    path: argocd/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,34 @@
+# ArgoCD App: Users API
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# Deploys users-api backend service.
+# Route (/api/users) and plugins (JWT, rate-limiting, CORS) are configured
+# in Konnect. Service exposed via internal NLB for Kong Cloud Gateway access.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: users-api
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
+    targetRevision: HEAD
+    path: k8s/apps/api
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: api
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

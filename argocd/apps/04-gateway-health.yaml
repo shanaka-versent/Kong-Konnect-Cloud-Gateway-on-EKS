@@ -1,0 +1,33 @@
+# ArgoCD App: Gateway Health
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# Deploys health-responder for Kong Cloud Gateway health checks.
+# Kong Cloud Gateway routes /healthz to this service via Transit Gateway.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gateway-health
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
+    targetRevision: HEAD
+    path: k8s/gateway-health
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gateway-health
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

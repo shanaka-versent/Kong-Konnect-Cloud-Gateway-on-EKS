@@ -1,0 +1,159 @@
+# Kong Konnect Cloud Gateway — Declarative Configuration (decK)
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# This file defines routes, services, plugins, and consumers for the
+# Kong Dedicated Cloud Gateway managed by Konnect.
+#
+# IMPORTANT: Update service URLs with your internal NLB endpoints.
+# Run ./scripts/03-post-terraform-setup.sh to get the NLB DNS names.
+#
+# Apply with:
+#   deck gateway sync -s deck/kong.yaml \
+#     --konnect-addr https://au.api.konghq.com \
+#     --konnect-token $KONNECT_TOKEN \
+#     --konnect-control-plane-name kong-cloud-gateway-eks
+
+_format_version: "3.0"
+
+# ==============================================================================
+# GLOBAL PLUGINS
+# ==============================================================================
+
+plugins:
+  # --------------------------------------------------------------------------
+  # CloudFront Bypass Prevention (Optional — enable when using CloudFront)
+  # --------------------------------------------------------------------------
+  # This pre-function plugin verifies the custom origin header injected by
+  # CloudFront. Requests without the correct header are rejected with 403.
+  #
+  # How it works:
+  # 1. CloudFront injects X-CF-Secret header on every request to Kong origin
+  # 2. This plugin checks for the header and validates the secret value
+  # 3. Requests hitting Kong directly (bypassing CloudFront) are blocked
+  #
+  # To enable:
+  # 1. Uncomment the plugin below
+  # 2. Replace <YOUR_CF_ORIGIN_SECRET> with the same value used in
+  #    terraform.tfvars for cf_origin_header_value
+  # 3. Sync: deck gateway sync -s deck/kong.yaml ...
+  #
+  # - name: pre-function
+  #   config:
+  #     access:
+  #       - |
+  #         local cf_secret = kong.request.get_header("X-CF-Secret")
+  #         if cf_secret ~= "<YOUR_CF_ORIGIN_SECRET>" then
+  #           return kong.response.exit(403, { message = "Direct access not allowed" })
+  #         end
+
+# ==============================================================================
+# SERVICES & ROUTES
+# ==============================================================================
+# Service URLs point to internal NLBs (accessible via Transit Gateway).
+# Replace <xxx-nlb-dns> with actual internal NLB DNS names from:
+#   kubectl get svc -A -o wide | grep LoadBalancer
+
+services:
+  # --------------------------------------------------------------------------
+  # Users API — JWT-protected REST API
+  # --------------------------------------------------------------------------
+  - name: users-api
+    url: http://<users-api-nlb-dns>:80
+    protocol: http
+    port: 80
+    routes:
+      - name: users-api-route
+        paths:
+          - /api/users
+        strip_path: false
+        protocols:
+          - https
+          - http
+    plugins:
+      - name: jwt
+        config:
+          key_claim_name: iss
+          claims_to_verify:
+            - exp
+      - name: rate-limiting
+        config:
+          minute: 100
+          policy: local
+          fault_tolerant: true
+          hide_client_headers: false
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - OPTIONS
+          headers:
+            - Authorization
+            - Content-Type
+          max_age: 3600
+
+  # --------------------------------------------------------------------------
+  # Tenant App 1
+  # --------------------------------------------------------------------------
+  - name: tenant-app1
+    url: http://<app1-nlb-dns>:80
+    protocol: http
+    port: 80
+    routes:
+      - name: app1-route
+        paths:
+          - /app1
+        strip_path: false
+        protocols:
+          - https
+          - http
+
+  # --------------------------------------------------------------------------
+  # Tenant App 2
+  # --------------------------------------------------------------------------
+  - name: tenant-app2
+    url: http://<app2-nlb-dns>:80
+    protocol: http
+    port: 80
+    routes:
+      - name: app2-route
+        paths:
+          - /app2
+        strip_path: false
+        protocols:
+          - https
+          - http
+
+  # --------------------------------------------------------------------------
+  # Health Check
+  # --------------------------------------------------------------------------
+  - name: gateway-health
+    url: http://<health-nlb-dns>:80
+    protocol: http
+    port: 80
+    routes:
+      - name: health-route
+        paths:
+          - /healthz
+        strip_path: false
+        protocols:
+          - https
+          - http
+
+# ==============================================================================
+# CONSUMERS & CREDENTIALS
+# ==============================================================================
+
+consumers:
+  - username: demo-user
+    jwt_secrets:
+      - key: demo-issuer
+        secret: demo-secret-key-do-not-use-in-production
+        algorithm: HS256

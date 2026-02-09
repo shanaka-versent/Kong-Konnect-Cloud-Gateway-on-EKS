@@ -1,0 +1,33 @@
+# ArgoCD App: Tenant App 2
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# Deploys sample-app-2 — route /app2 configured in Konnect.
+# Exposed via internal NLB for Kong Cloud Gateway access.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenant-app2
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
+    targetRevision: HEAD
+    path: k8s/apps/tenant-app2
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tenant-app2
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
