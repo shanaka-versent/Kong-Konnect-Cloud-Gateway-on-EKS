@@ -29,6 +29,10 @@ graph TB
             subgraph istio-ingress
                 NLB[Internal NLB<br/>Single Entry Point]
                 IGW[Istio Gateway<br/>K8s Gateway API]
+                HR1[/HTTPRoute /healthz/]
+                HR2[/HTTPRoute /app1/]
+                HR3[/HTTPRoute /app2/]
+                HR4[/HTTPRoute /api/users/]
             end
             subgraph gateway-health
                 Health[health-responder<br/>ClusterIP]
@@ -48,10 +52,14 @@ graph TB
     Kong -->|Private via TGW| TGW
     TGW --> NLB
     NLB --> IGW
-    IGW -->|HTTPRoute /healthz| Health
-    IGW -->|HTTPRoute /app1| App1
-    IGW -->|HTTPRoute /app2| App2
-    IGW -->|HTTPRoute /api/users| API
+    IGW --> HR1
+    IGW --> HR2
+    IGW --> HR3
+    IGW --> HR4
+    HR1 --> Health
+    HR2 --> App1
+    HR3 --> App2
+    HR4 --> API
     Istiod -.->|Config| ZT
     ZT -.->|mTLS| App1
     ZT -.->|mTLS| App2
@@ -64,6 +72,10 @@ graph TB
     style CF fill:#F68D2E,color:#fff
     style TGW fill:#232F3E,color:#fff
     style NLB fill:#232F3E,color:#fff
+    style HR1 fill:#7B68EE,color:#fff
+    style HR2 fill:#7B68EE,color:#fff
+    style HR3 fill:#7B68EE,color:#fff
+    style HR4 fill:#7B68EE,color:#fff
 ```
 
 ### Traffic Flow
