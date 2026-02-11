@@ -443,3 +443,25 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 6. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
 
 > The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
+
+---
+
+## Appendix
+
+### CloudFront Origin mTLS — Terraform Workaround
+
+**Problem:** The Terraform AWS provider (as of v6.31) does **not** support `origin_mtls_config` on the `aws_cloudfront_distribution` resource. CloudFront origin mTLS was launched by AWS in January 2026 and is supported via Console, CLI, SDK, CDK, and CloudFormation — but not yet in the Terraform provider.
+
+**Workaround:** The CloudFront distribution is created via `aws_cloudformation_stack` instead of the native `aws_cloudfront_distribution` resource. This allows us to use the CloudFormation `AWS::CloudFront::Distribution` resource which supports `OriginMtlsConfig` with `ClientCertificateArn`. All other resources (WAF Web ACL, OAC, cache policies, response headers policy) remain native Terraform resources and are passed into the CloudFormation stack as parameters.
+
+See: [`terraform/modules/cloudfront/main.tf`](terraform/modules/cloudfront/main.tf)
+
+**Migration path** (once Terraform provider adds support):
+
+1. Watch [terraform-provider-aws](https://github.com/hashicorp/terraform-provider-aws) for a PR adding `origin_mtls_config` to `aws_cloudfront_distribution`
+2. Replace `aws_cloudformation_stack.cloudfront` with the native `aws_cloudfront_distribution` resource
+3. `terraform state rm` to remove the CloudFormation stack from state
+4. `terraform import` to import the distribution into the new resource
+5. Update `outputs.tf` to reference native resource attributes
+6. `terraform apply` to verify no changes (state matches)
+7. Delete the orphaned CloudFormation stack from the AWS console
