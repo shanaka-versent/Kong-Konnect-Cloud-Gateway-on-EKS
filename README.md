@@ -21,11 +21,6 @@ graph TB
 
     subgraph your_acct ["Your AWS Account (10.0.0.0/16)"]
         subgraph eks_cluster [EKS Cluster]
-            subgraph ns_istio_sys [istio-system]
-                Istiod[istiod<br/>Control Plane]
-                CNI[istio-cni<br/>DaemonSet]
-                ZT[ztunnel<br/>L4 mTLS]
-            end
             subgraph ns_istio_ing [istio-ingress]
                 NLB[Internal NLB]
                 IGW[Istio Gateway<br/>K8s Gateway API]
@@ -60,15 +55,9 @@ graph TB
     HR2 --> App1
     HR3 --> App2
     HR4 --> API
-    Istiod -.->|Config| ZT
-    ZT -.->|mTLS| App1
-    ZT -.->|mTLS| App2
-    ZT -.->|mTLS| API
-    ZT -.->|mTLS| Health
 
     style Kong fill:#003459,color:#fff
     style IGW fill:#466BB0,color:#fff
-    style Istiod fill:#466BB0,color:#fff
     style CF fill:#F68D2E,color:#fff
     style TGW fill:#232F3E,color:#fff
     style NLB fill:#232F3E,color:#fff
@@ -79,7 +68,6 @@ graph TB
     style kong_acct fill:#E8E8E8,stroke:#999,color:#333
     style your_acct fill:#E8E8E8,stroke:#999,color:#333
     style eks_cluster fill:#F0F0F0,stroke:#BBB,color:#333
-    style ns_istio_sys fill:#F5F5F5,stroke:#CCC,color:#333
     style ns_istio_ing fill:#F5F5F5,stroke:#CCC,color:#333
     style ns_gw_health fill:#F5F5F5,stroke:#CCC,color:#333
     style ns_sample fill:#F5F5F5,stroke:#CCC,color:#333
