@@ -1,3 +1,8 @@
+# Environment variables (contains Konnect tokens -- NEVER commit)
+.env
+.env.local
+.env.*.local
+
 # Terraform
 *.tfstate
 *.tfstate.*

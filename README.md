@@ -297,7 +297,24 @@ Namespaces opt into the mesh via the label `istio.io/dataplane-mode: ambient`. N
 
 ## Deployment
 
-### Step 1: Deploy Infrastructure (Terraform)
+### Step 1: Configure Konnect Credentials
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your Konnect token and region:
+
+```bash
+KONNECT_REGION="au"
+KONNECT_TOKEN="kpat_your_token_here"
+KONNECT_CONTROL_PLANE_NAME="kong-cloud-gateway-eks"
+```
+
+> **`.env` is gitignored** — your token will never be committed to Git.
+> All scripts automatically source `.env` so you don't need to export variables manually.
+
+### Step 2: Deploy Infrastructure (Terraform)
 
 ```bash
 cd terraform
@@ -307,13 +324,22 @@ terraform apply
 
 Creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, ArgoCD.
 
-### Step 2: Configure kubectl
+Then update `.env` with Terraform outputs:
+
+```bash
+# Add these to your .env file
+TRANSIT_GATEWAY_ID="$(terraform -chdir=terraform output -raw transit_gateway_id)"
+RAM_SHARE_ARN="$(terraform -chdir=terraform output -raw ram_share_arn)"
+EKS_VPC_CIDR="$(terraform -chdir=terraform output -raw vpc_cidr)"
+```
+
+### Step 3: Configure kubectl
 
 ```bash
 aws eks update-kubeconfig --name $(terraform -chdir=terraform output -raw cluster_name) --region ap-southeast-2
 ```
 
-### Step 3: Deploy ArgoCD Root App
+### Step 4: Deploy ArgoCD Root App
 
 ```bash
 kubectl apply -f argocd/apps/root-app.yaml
@@ -331,7 +357,7 @@ ArgoCD deploys everything automatically via **sync waves** in the correct depend
 | 6 | HTTPRoutes | Path-based routing rules + ReferenceGrants |
 | 7 | Applications | Backend services (all ClusterIP) |
 
-### Step 4: (Optional) Generate TLS Certificates
+### Step 5: (Optional) Generate TLS Certificates
 
 ```bash
 ./scripts/01-generate-certs.sh
@@ -341,21 +367,17 @@ kubectl create secret tls istio-gateway-tls \
   -n istio-ingress
 ```
 
-### Step 5: Set Up Kong Cloud Gateway in Konnect
+### Step 6: Set Up Kong Cloud Gateway in Konnect
 
 ```bash
-export KONNECT_REGION="au"
-export KONNECT_TOKEN="kpat_xxx..."
-export TRANSIT_GATEWAY_ID=$(terraform -chdir=terraform output -raw transit_gateway_id)
-export RAM_SHARE_ARN=$(terraform -chdir=terraform output -raw ram_share_arn)
-export EKS_VPC_CIDR=$(terraform -chdir=terraform output -raw vpc_cidr)
+# .env is auto-sourced — no need to export KONNECT_TOKEN manually
 ./scripts/02-setup-cloud-gateway.sh
 ```
 
 After running, accept the Transit Gateway attachment in AWS Console:
 **VPC → Transit Gateway Attachments → Accept**
 
-### Step 6: Configure Kong Routes (decK)
+### Step 7: Configure Kong Routes (decK)
 
 Get the Istio Gateway NLB endpoint:
 
@@ -377,14 +399,27 @@ services:
     url: http://<istio-gateway-nlb-dns>:80    # inside the cluster
 ```
 
-Sync to Konnect:
+Sync to Konnect (`.env` is auto-sourced):
 
 ```bash
 deck gateway sync -s deck/kong.yaml \
-  --konnect-addr https://au.api.konghq.com \
+  --konnect-addr https://${KONNECT_REGION}.api.konghq.com \
   --konnect-token $KONNECT_TOKEN \
-  --konnect-control-plane-name kong-cloud-gateway-eks
+  --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
+
+### Konnect UI — Analytics & Configuration
+
+Once deployed, everything is visible and configurable in the **Konnect UI** at [cloud.konghq.com](https://cloud.konghq.com):
+
+| Feature | Where in Konnect UI |
+|---------|-------------------|
+| **API Analytics** | Analytics → Dashboard (request counts, latency P50/P95/P99, error rates) |
+| **Gateway Health** | Gateway Manager → Data Plane Nodes (status, connections) |
+| **Routes & Services** | Gateway Manager → Routes / Services |
+| **Plugins** | Gateway Manager → Plugins (JWT, rate limiting, CORS, transforms) |
+| **Consumers** | Gateway Manager → Consumers (API keys, JWT credentials, usage) |
+| **Dev Portal** | Dev Portal → Published APIs (optional, for API documentation) |
 
 ---
 
