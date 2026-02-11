@@ -1,6 +1,6 @@
 # Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)
 
-Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics all visible in the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed.
+Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics all visible in the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **CloudFront + WAF** provides edge security with origin mTLS bypass prevention. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed.
 
 ---
 
@@ -11,7 +11,7 @@ Two AWS accounts are involved. Traffic never touches the public internet between
 ```mermaid
 graph TB
     Client([Client])
-    CF[CloudFront + WAF<br/>Edge Security — Optional]
+    CF[CloudFront + WAF<br/>Edge Security + Origin mTLS]
 
     subgraph "Kong's AWS Account (192.168.0.0/16)"
         Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>JWT · Rate Limit · CORS · Analytics]
@@ -44,8 +44,7 @@ graph TB
     end
 
     Client -->|HTTPS| CF
-    CF -->|HTTPS| Kong
-    Client -.->|Direct| Kong
+    CF -->|HTTPS + Origin mTLS| Kong
     Kong -->|Private via TGW| TGW
     TGW --> NLB
     NLB --> IGW
@@ -85,7 +84,7 @@ sequenceDiagram
     end
 
     C->>CF: HTTPS Request
-    CF->>K: HTTPS (mTLS bypass prevention)
+    CF->>K: HTTPS (origin mTLS bypass prevention)
     Note over K: JWT Auth, Rate Limiting,<br/>CORS, Request Transform
     K->>TGW: HTTP to NLB DNS (private, no internet)
     Note over TGW: 192.168.0.0/16 ↔ 10.0.0.0/16
@@ -169,7 +168,7 @@ How it works:
 | Layer | Component | Protection |
 |-------|-----------|------------|
 | 1 | CloudFront + WAF | DDoS, SQLi/XSS, rate limiting, geo-blocking |
-| 2 | Origin mTLS | CloudFront bypass prevention |
+| 2 | Origin mTLS | CloudFront bypass prevention (via CloudFormation) |
 | 3 | Kong Plugins | JWT auth, rate limiting, CORS, request transform |
 | 4 | Transit Gateway | Private connectivity — backends never exposed publicly |
 | 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods |
@@ -177,15 +176,17 @@ How it works:
 
 ---
 
-## Deployment
-
-### Prerequisites
+## Prerequisites
 
 - AWS CLI configured with credentials
 - Terraform >= 1.5
 - kubectl + Helm 3
 - [decK CLI](https://docs.konghq.com/deck/latest/)
 - [Kong Konnect](https://konghq.com/products/kong-konnect) account with Dedicated Cloud Gateway entitlement
+
+---
+
+## Deployment
 
 ### Step 1: Configure Konnect Credentials
 
@@ -206,17 +207,18 @@ KONNECT_CONTROL_PLANE_NAME="kong-cloud-gateway-eks"
 ### Step 2: Deploy Infrastructure
 
 ```bash
-cd terraform
-terraform init
-terraform apply
+terraform -chdir=terraform init
+terraform -chdir=terraform apply
 ```
 
-This creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, and ArgoCD.
+This creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF, and ArgoCD.
 
 ### Step 3: Configure kubectl
 
 ```bash
-aws eks update-kubeconfig --name $(terraform -chdir=terraform output -raw cluster_name) --region ap-southeast-2
+aws eks update-kubeconfig \
+  --name $(terraform -chdir=terraform output -raw cluster_name) \
+  --region ap-southeast-2
 ```
 
 ### Step 4: Deploy ArgoCD Root App
@@ -243,18 +245,20 @@ ArgoCD deploys everything via **sync waves** in dependency order:
 ./scripts/02-setup-cloud-gateway.sh
 ```
 
-Then accept the Transit Gateway attachment in AWS Console:
+This creates the Konnect control plane (with `cloud_gateway: true`), provisions the Cloud Gateway network, creates the data plane group, and attaches the Transit Gateway.
+
+Once the network reaches `ready` state (~30 minutes), accept the Transit Gateway attachment in AWS Console:
 **VPC → Transit Gateway Attachments → Accept**
 
 ### Step 6: Configure Kong Routes
 
-Get the Istio Gateway NLB endpoint:
+Get the Istio Gateway NLB endpoint and update `deck/kong.yaml`:
 
 ```bash
 ./scripts/03-post-terraform-setup.sh
 ```
 
-Update `deck/kong.yaml` — all services point to the **same** NLB:
+Replace `<istio-gateway-nlb-dns>` in `deck/kong.yaml` with the NLB hostname from the script output. All services point to the **same** NLB — Istio Gateway uses HTTPRoutes to route to the correct backend:
 
 ```yaml
 services:
@@ -262,16 +266,12 @@ services:
     url: http://<istio-gateway-nlb-dns>:80
   - name: tenant-app1
     url: http://<istio-gateway-nlb-dns>:80
-  - name: tenant-app2
-    url: http://<istio-gateway-nlb-dns>:80
-  - name: gateway-health
-    url: http://<istio-gateway-nlb-dns>:80
 ```
 
-Sync to Konnect:
+Sync routes to Konnect:
 
 ```bash
-deck gateway sync -s deck/kong.yaml \
+deck gateway sync deck/kong.yaml \
   --konnect-addr https://${KONNECT_REGION}.api.konghq.com \
   --konnect-token $KONNECT_TOKEN \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
@@ -288,21 +288,6 @@ kubectl create secret tls istio-gateway-tls \
   --key=certs/server.key \
   -n istio-ingress
 ```
-
----
-
-## Konnect UI — Analytics & Configuration
-
-Once deployed, everything is visible and configurable at [cloud.konghq.com](https://cloud.konghq.com):
-
-| Feature | Where in Konnect UI |
-|---------|-------------------|
-| **API Analytics** | Analytics → Dashboard (request counts, latency P50/P95/P99, error rates) |
-| **Gateway Health** | Gateway Manager → Data Plane Nodes (status, connections) |
-| **Routes & Services** | Gateway Manager → Routes / Services |
-| **Plugins** | Gateway Manager → Plugins (JWT, rate limiting, CORS, transforms) |
-| **Consumers** | Gateway Manager → Consumers (API keys, JWT credentials, usage) |
-| **Dev Portal** | Dev Portal → Published APIs (optional) |
 
 ---
 
@@ -330,8 +315,7 @@ export KONG_URL="https://<kong-cloud-gw-proxy-url>"
 curl $KONG_URL/healthz
 curl $KONG_URL/app1
 curl $KONG_URL/app2
-curl -H "Authorization: Bearer $(./scripts/02-generate-jwt.sh | tail -1)" \
-  $KONG_URL/api/users
+curl -H "Authorization: Bearer <jwt-token>" $KONG_URL/api/users
 ```
 
 ### ArgoCD UI
@@ -344,28 +328,37 @@ kubectl port-forward svc/argocd-server -n argocd 8080:80
 
 ---
 
+## Konnect UI — Analytics & Configuration
+
+Once deployed, everything is visible and configurable at [cloud.konghq.com](https://cloud.konghq.com):
+
+| Feature | Where in Konnect UI |
+|---------|-------------------|
+| **API Analytics** | Analytics → Dashboard (request counts, latency P50/P95/P99, error rates) |
+| **Gateway Health** | Gateway Manager → Data Plane Nodes (status, connections) |
+| **Routes & Services** | Gateway Manager → Routes / Services |
+| **Plugins** | Gateway Manager → Plugins (JWT, rate limiting, CORS, transforms) |
+| **Consumers** | Gateway Manager → Consumers (API keys, JWT credentials, usage) |
+| **Dev Portal** | Dev Portal → Published APIs (optional) |
+
+---
+
 ## Teardown
 
 ```bash
 ./scripts/destroy.sh
 ```
 
-The script tears down in the correct order to avoid orphaned AWS resources:
+The script tears down the **full stack** in the correct order to avoid orphaned resources:
 
 1. **Delete Istio Gateway** → triggers NLB deprovisioning via AWS LB Controller
 2. **Wait for NLB/ENI cleanup** → prevents VPC deletion failures
 3. **Delete ArgoCD apps** → cascade removes Istio components and workloads
 4. **Cleanup CRDs** → removes Gateway API and Istio CRDs (finalizers)
-5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share
+5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront
+6. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
 
-**Kong Cloud Gateway** runs in Kong's AWS account — delete it separately:
-
-```bash
-# Konnect UI: https://cloud.konghq.com → Gateway Manager → Delete
-# Or via API:
-curl -X DELETE "https://${KONNECT_REGION}.api.konghq.com/v2/control-planes/${CP_ID}" \
-  -H "Authorization: Bearer $KONNECT_TOKEN"
-```
+> The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
 
 ---
 
@@ -400,7 +393,7 @@ graph LR
     end
 
     subgraph "Layer 6: Edge Security — Terraform"
-        CFront[CloudFront + WAF<br/>Optional]
+        CFront[CloudFront + WAF<br/>Origin mTLS]
     end
 
     VPC --> EKS
