@@ -262,134 +262,37 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
 }
 
 # ==============================================================================
-# CLOUDFRONT DISTRIBUTION
+# CLOUDFRONT DISTRIBUTION (via CloudFormation)
 # ==============================================================================
+# The Terraform AWS provider does not yet support OriginMtlsConfig for
+# CloudFront distributions (as of v6.31). AWS CloudFormation DOES support it,
+# so we wrap the distribution in an aws_cloudformation_stack resource.
+#
+# All other resources (WAF, OAC, cache policies, response headers) remain
+# native Terraform resources and are passed into the stack as parameters.
 
-resource "aws_cloudfront_distribution" "main" {
-  enabled             = true
-  is_ipv6_enabled     = true
-  comment             = "${var.name_prefix} - CloudFront WAF → Kong Cloud Gateway"
-  default_root_object = ""
-  price_class         = var.price_class
-  web_acl_id          = var.enable_waf ? aws_wafv2_web_acl.main[0].arn : null
+resource "aws_cloudformation_stack" "cloudfront" {
+  name = "${var.name_prefix}-cloudfront-dist"
 
-  aliases = var.custom_domain != "" ? [var.custom_domain] : []
-
-  # ---------------------------------------------------------------------------
-  # Kong Cloud Gateway Origin (custom origin via public NLB)
-  #
-  # Kong's Dedicated Cloud Gateway provides a public proxy URL
-  # (e.g., <prefix>.au.kong-cloud.com). CloudFront connects to this
-  # over HTTPS with two layers of bypass prevention:
-  #
-  # Layer 1 (mTLS): CloudFront presents a client certificate during TLS
-  #   handshake. Kong validates the cert → rejects non-CloudFront connections.
-  #   Strongest protection — cryptographic proof of identity.
-  #
-  # Layer 2 (Header): CloudFront injects X-CF-Secret header. A Kong
-  #   pre-function plugin validates it → rejects requests without it.
-  #   Application-layer defense-in-depth.
-  # ---------------------------------------------------------------------------
-  origin {
-    domain_name = var.kong_cloud_gateway_domain
-    origin_id   = "KongCloudGateway"
-
-    custom_origin_config {
-      http_port              = 80
-      https_port             = 443
-      origin_protocol_policy = "https-only"
-      origin_ssl_protocols   = ["TLSv1.2"]
-      origin_read_timeout    = 30
-      origin_keepalive_timeout = 5
-    }
-
-    # Origin mTLS — CloudFront presents client certificate to Kong origin
-    # Requires ACM certificate in us-east-1 with EKU=clientAuth
-    # Kong Cloud Gateway must be configured to require client certificates
-    dynamic "origin_mtls_config" {
-      for_each = var.origin_mtls_certificate_arn != "" ? [1] : []
-      content {
-        client_certificate_arn = var.origin_mtls_certificate_arn
-      }
-    }
-
-    # Custom origin header — application-layer bypass prevention
-    # Kong pre-function plugin validates this header
-    dynamic "custom_header" {
-      for_each = var.cf_origin_header_value != "" ? [1] : []
-      content {
-        name  = var.cf_origin_header_name
-        value = var.cf_origin_header_value
-      }
-    }
-  }
-
-  # ---------------------------------------------------------------------------
-  # S3 Origin for static assets (optional)
-  # ---------------------------------------------------------------------------
-  dynamic "origin" {
-    for_each = var.enable_s3_origin ? [1] : []
-    content {
-      domain_name              = var.s3_bucket_regional_domain_name
-      origin_id                = "S3-static-assets"
-      origin_access_control_id = aws_cloudfront_origin_access_control.s3[0].id
-    }
-  }
-
-  # ---------------------------------------------------------------------------
-  # Default behavior - All API traffic routes to Kong Cloud Gateway
-  # CachingDisabled ensures every request hits Kong for real-time processing
-  # ---------------------------------------------------------------------------
-  default_cache_behavior {
-    allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods   = ["GET", "HEAD"]
-    target_origin_id = "KongCloudGateway"
-
-    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
-    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
-
-    viewer_protocol_policy = "redirect-to-https"
-    compress               = true
-  }
-
-  # ---------------------------------------------------------------------------
-  # Static assets behavior (/static/*) - optional
-  # ---------------------------------------------------------------------------
-  dynamic "ordered_cache_behavior" {
-    for_each = var.enable_s3_origin ? [1] : []
-    content {
-      path_pattern     = "/static/*"
-      allowed_methods  = ["GET", "HEAD", "OPTIONS"]
-      cached_methods   = ["GET", "HEAD"]
-      target_origin_id = "S3-static-assets"
-
-      cache_policy_id            = aws_cloudfront_cache_policy.static_assets[0].id
-      response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
-
-      viewer_protocol_policy = "redirect-to-https"
-      compress               = true
-    }
-  }
-
-  # ---------------------------------------------------------------------------
-  # Restrictions
-  # ---------------------------------------------------------------------------
-  restrictions {
-    geo_restriction {
-      restriction_type = var.geo_restriction_type
-      locations        = var.geo_restriction_locations
-    }
-  }
-
-  # ---------------------------------------------------------------------------
-  # TLS Certificate
-  # ---------------------------------------------------------------------------
-  viewer_certificate {
-    cloudfront_default_certificate = var.acm_certificate_arn == ""
-    acm_certificate_arn            = var.acm_certificate_arn != "" ? var.acm_certificate_arn : null
-    ssl_support_method             = var.acm_certificate_arn != "" ? "sni-only" : null
-    minimum_protocol_version       = var.acm_certificate_arn != "" ? "TLSv1.2_2021" : null
+  parameters = {
+    Comment                    = "${var.name_prefix} - CloudFront WAF > Kong Cloud Gateway"
+    PriceClass                 = var.price_class
+    WebACLArn                  = var.enable_waf ? aws_wafv2_web_acl.main[0].arn : ""
+    Aliases                    = var.custom_domain
+    KongDomainName             = var.kong_cloud_gateway_domain
+    OriginMtlsCertificateArn   = var.origin_mtls_certificate_arn
+    CfOriginHeaderName         = var.cf_origin_header_name
+    CfOriginHeaderValue        = var.cf_origin_header_value
+    CachePolicyId              = data.aws_cloudfront_cache_policy.caching_disabled.id
+    OriginRequestPolicyId      = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
+    ResponseHeadersPolicyId    = aws_cloudfront_response_headers_policy.security_headers.id
+    AcmCertificateArn          = var.acm_certificate_arn
+    EnableS3Origin             = var.enable_s3_origin ? "true" : "false"
+    S3BucketDomainName         = var.s3_bucket_regional_domain_name
+    S3OACId                    = var.enable_s3_origin ? aws_cloudfront_origin_access_control.s3[0].id : ""
+    S3CachePolicyId            = var.enable_s3_origin ? aws_cloudfront_cache_policy.static_assets[0].id : ""
+    GeoRestrictionType         = var.geo_restriction_type
+    GeoRestrictionLocations    = join(",", var.geo_restriction_locations)
   }
 
   tags = merge(var.tags, {
@@ -397,4 +300,179 @@ resource "aws_cloudfront_distribution" "main" {
     Layer  = "Layer2-EdgeSecurity"
     Module = "cloudfront"
   })
+
+  template_body = <<-TEMPLATE
+  AWSTemplateFormatVersion: "2010-09-09"
+  Description: "CloudFront distribution with origin mTLS support for Kong Cloud Gateway"
+
+  Parameters:
+    Comment:
+      Type: String
+    PriceClass:
+      Type: String
+    WebACLArn:
+      Type: String
+      Default: ""
+    Aliases:
+      Type: String
+      Default: ""
+    KongDomainName:
+      Type: String
+    OriginMtlsCertificateArn:
+      Type: String
+      Default: ""
+    CfOriginHeaderName:
+      Type: String
+      Default: "X-CF-Secret"
+    CfOriginHeaderValue:
+      Type: String
+      Default: ""
+      NoEcho: true
+    CachePolicyId:
+      Type: String
+    OriginRequestPolicyId:
+      Type: String
+    ResponseHeadersPolicyId:
+      Type: String
+    AcmCertificateArn:
+      Type: String
+      Default: ""
+    EnableS3Origin:
+      Type: String
+      Default: "false"
+      AllowedValues: ["true", "false"]
+    S3BucketDomainName:
+      Type: String
+      Default: ""
+    S3OACId:
+      Type: String
+      Default: ""
+    S3CachePolicyId:
+      Type: String
+      Default: ""
+    GeoRestrictionType:
+      Type: String
+      Default: "none"
+    GeoRestrictionLocations:
+      Type: CommaDelimitedList
+      Default: ""
+
+  Conditions:
+    HasWebACL: !Not [!Equals [!Ref WebACLArn, ""]]
+    HasAlias: !Not [!Equals [!Ref Aliases, ""]]
+    HasOriginMtls: !Not [!Equals [!Ref OriginMtlsCertificateArn, ""]]
+    HasOriginHeader: !Not [!Equals [!Ref CfOriginHeaderValue, ""]]
+    HasAcmCert: !Not [!Equals [!Ref AcmCertificateArn, ""]]
+    HasS3Origin: !Equals [!Ref EnableS3Origin, "true"]
+    HasGeoLocations: !Not [!Equals [!Select [0, !Ref GeoRestrictionLocations], ""]]
+
+  Resources:
+    CloudFrontDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          IPV6Enabled: true
+          Comment: !Ref Comment
+          PriceClass: !Ref PriceClass
+          WebACLId: !If [HasWebACL, !Ref WebACLArn, !Ref "AWS::NoValue"]
+          Aliases: !If [HasAlias, [!Ref Aliases], !Ref "AWS::NoValue"]
+
+          Origins:
+            - DomainName: !Ref KongDomainName
+              Id: KongCloudGateway
+              CustomOriginConfig:
+                HTTPPort: 80
+                HTTPSPort: 443
+                OriginProtocolPolicy: https-only
+                OriginSSLProtocols: [TLSv1.2]
+                OriginReadTimeout: 30
+                OriginKeepaliveTimeout: 5
+              OriginMtlsConfig: !If
+                - HasOriginMtls
+                - ClientCertificateArn: !Ref OriginMtlsCertificateArn
+                - !Ref "AWS::NoValue"
+              OriginCustomHeaders: !If
+                - HasOriginHeader
+                - - HeaderName: !Ref CfOriginHeaderName
+                    HeaderValue: !Ref CfOriginHeaderValue
+                - !Ref "AWS::NoValue"
+
+          DefaultCacheBehavior:
+            AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+            CachedMethods: [GET, HEAD]
+            TargetOriginId: KongCloudGateway
+            CachePolicyId: !Ref CachePolicyId
+            OriginRequestPolicyId: !Ref OriginRequestPolicyId
+            ResponseHeadersPolicyId: !Ref ResponseHeadersPolicyId
+            ViewerProtocolPolicy: redirect-to-https
+            Compress: true
+
+          ViewerCertificate: !If
+            - HasAcmCert
+            - AcmCertificateArn: !Ref AcmCertificateArn
+              SslSupportMethod: sni-only
+              MinimumProtocolVersion: TLSv1.2_2021
+            - CloudFrontDefaultCertificate: true
+
+          Restrictions:
+            GeoRestriction:
+              RestrictionType: !Ref GeoRestrictionType
+              Locations: !If [HasGeoLocations, !Ref GeoRestrictionLocations, !Ref "AWS::NoValue"]
+
+        Tags:
+          - Key: Name
+            Value: !Sub "$${Comment}-cloudfront"
+          - Key: Layer
+            Value: Layer2-EdgeSecurity
+          - Key: Module
+            Value: cloudfront
+
+  Outputs:
+    DistributionId:
+      Value: !Ref CloudFrontDistribution
+    DistributionArn:
+      Value: !Sub "arn:aws:cloudfront::$${AWS::AccountId}:distribution/$${CloudFrontDistribution}"
+    DistributionDomainName:
+      Value: !GetAtt CloudFrontDistribution.DomainName
+    DistributionHostedZoneId:
+      Description: "CloudFront hosted zone ID (always Z2FDTNDATAQYW2)"
+      Value: "Z2FDTNDATAQYW2"
+  TEMPLATE
 }
+
+# ==============================================================================
+# LIMITATION / WORKAROUND
+# ==============================================================================
+#
+# Problem:
+#   The Terraform AWS provider (as of v6.31) does NOT support OriginMtlsConfig
+#   on the aws_cloudfront_distribution resource. AWS CloudFront origin mTLS was
+#   launched in January 2026 and is supported via Console, CLI, SDK, CDK, and
+#   CloudFormation — but not yet in the Terraform provider.
+#
+# Workaround:
+#   The CloudFront distribution is created via aws_cloudformation_stack instead
+#   of the native aws_cloudfront_distribution resource. This allows us to use
+#   the CloudFormation AWS::CloudFront::Distribution resource which supports
+#   OriginMtlsConfig with ClientCertificateArn.
+#
+#   All other resources (WAF Web ACL, OAC, cache policies, response headers
+#   policy) remain native Terraform resources and are passed into the
+#   CloudFormation stack as parameters.
+#
+# How to replace with native Terraform when support is added:
+#   1. Watch https://github.com/hashicorp/terraform-provider-aws for a PR
+#      adding origin_mtls_config to aws_cloudfront_distribution
+#   2. Once available, replace the aws_cloudformation_stack.cloudfront resource
+#      above with the native aws_cloudfront_distribution resource
+#   3. Use `terraform state rm` to remove the CloudFormation stack from state
+#   4. Use `terraform import` to import the distribution into the new resource
+#   5. Update outputs.tf to reference the native resource attributes
+#   6. Run `terraform apply` to verify no changes (state matches)
+#   7. Delete the CloudFormation stack from the AWS console (it will be orphaned)
+#
+# Tracking:
+#   - AWS announcement: CloudFront origin mTLS (January 2026)
+#   - Terraform provider issue: TBD (open one if not yet tracked)
+# ==============================================================================
