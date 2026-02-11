@@ -217,6 +217,59 @@ How it works:
 
 ---
 
+## Deployment Layers
+
+```mermaid
+graph TB
+    subgraph L1 ["Layer 1: Cloud Foundations — Terraform"]
+        VPC["VPC (10.0.0.0/16)<br/>Subnets · NAT · IGW"]
+    end
+
+    subgraph L2 ["Layer 2: EKS Platform — Terraform"]
+        EKS[EKS Cluster + Nodes]
+        LBC[AWS LB Controller]
+        TGW2[Transit Gateway + RAM]
+        ArgoCD2[ArgoCD]
+    end
+
+    subgraph L3 ["Layer 3: Service Mesh — ArgoCD"]
+        CRDs[Gateway API CRDs]
+        Istio[Istio Ambient<br/>base · istiod · cni · ztunnel]
+        GW[Istio Gateway<br/>Single Internal NLB]
+        Routes[HTTPRoutes<br/>+ ReferenceGrants]
+    end
+
+    subgraph L4 ["Layer 4: Applications — ArgoCD"]
+        Apps[Backend Services<br/>All ClusterIP]
+    end
+
+    subgraph L5 ["Layer 5: API Config — Kong Konnect"]
+        KongGW[Kong Cloud Gateway<br/>Routes · Plugins · Consumers<br/>Connects via Transit Gateway]
+    end
+
+    subgraph L6 ["Layer 6: Edge Security — Terraform"]
+        CFront[CloudFront + WAF<br/>Origin mTLS]
+    end
+
+    VPC --> EKS
+    EKS --> CRDs
+    CRDs --> Istio
+    Istio --> GW
+    GW --> Routes
+    Routes --> Apps
+    Apps -.->|Transit GW| KongGW
+    KongGW -.-> CFront
+
+    style L1 fill:#E8E8E8,stroke:#999,color:#333
+    style L2 fill:#E8E8E8,stroke:#999,color:#333
+    style L3 fill:#F0F0F0,stroke:#BBB,color:#333
+    style L4 fill:#F0F0F0,stroke:#BBB,color:#333
+    style L5 fill:#E8E8E8,stroke:#999,color:#333
+    style L6 fill:#E8E8E8,stroke:#999,color:#333
+```
+
+---
+
 ## Deployment
 
 ### Step 1: Configure Konnect Credentials
@@ -390,56 +443,3 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 6. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
 
 > The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
-
----
-
-## Deployment Layers
-
-```mermaid
-graph LR
-    subgraph L1 ["Layer 1: Cloud Foundations — Terraform"]
-        VPC["VPC (10.0.0.0/16)<br/>Subnets · NAT · IGW"]
-    end
-
-    subgraph L2 ["Layer 2: EKS Platform — Terraform"]
-        EKS[EKS Cluster + Nodes]
-        LBC[AWS LB Controller]
-        TGW2[Transit Gateway + RAM]
-        ArgoCD2[ArgoCD]
-    end
-
-    subgraph L3 ["Layer 3: Service Mesh — ArgoCD"]
-        CRDs[Gateway API CRDs]
-        Istio[Istio Ambient<br/>base · istiod · cni · ztunnel]
-        GW[Istio Gateway<br/>Single Internal NLB]
-        Routes[HTTPRoutes<br/>+ ReferenceGrants]
-    end
-
-    subgraph L4 ["Layer 4: Applications — ArgoCD"]
-        Apps[Backend Services<br/>All ClusterIP]
-    end
-
-    subgraph L5 ["Layer 5: API Config — Kong Konnect"]
-        KongGW[Kong Cloud Gateway<br/>Routes · Plugins · Consumers<br/>Connects via Transit Gateway]
-    end
-
-    subgraph L6 ["Layer 6: Edge Security — Terraform"]
-        CFront[CloudFront + WAF<br/>Origin mTLS]
-    end
-
-    VPC --> EKS
-    EKS --> CRDs
-    CRDs --> Istio
-    Istio --> GW
-    GW --> Routes
-    Routes --> Apps
-    Apps -.->|Transit GW| KongGW
-    KongGW -.-> CFront
-
-    style L1 fill:#E8E8E8,stroke:#999,color:#333
-    style L2 fill:#E8E8E8,stroke:#999,color:#333
-    style L3 fill:#F0F0F0,stroke:#BBB,color:#333
-    style L4 fill:#F0F0F0,stroke:#BBB,color:#333
-    style L5 fill:#E8E8E8,stroke:#999,color:#333
-    style L6 fill:#E8E8E8,stroke:#999,color:#333
-```
