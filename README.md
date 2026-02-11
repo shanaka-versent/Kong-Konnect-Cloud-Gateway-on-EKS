@@ -17,7 +17,7 @@ graph TB
         Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>JWT · Rate Limit · CORS · Analytics]
     end
 
-    TGW[AWS Transit Gateway<br/>Private Connectivity<br/>Shared via RAM]
+    TGW[AWS Transit Gateway]
 
     subgraph your_acct ["Your AWS Account (10.0.0.0/16)"]
         subgraph eks_cluster [EKS Cluster]
