@@ -2,9 +2,8 @@
 # Kong Cloud Gateway on EKS - Automated Stack Teardown
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# Tears down the EKS infrastructure including Istio Gateway and Ambient mesh.
-# The Kong Cloud Gateway (in Kong's AWS account) must be deleted separately
-# via Konnect UI or API.
+# Tears down the full stack: EKS infrastructure, Istio Gateway, Ambient mesh,
+# and Kong Cloud Gateway in Konnect (via API).
 #
 # DESTRUCTION ORDER:
 # ==================
@@ -13,7 +12,7 @@
 # 3. Delete ArgoCD applications (cascade deletes Istio components, apps)
 # 4. Cleanup Istio CRDs and remaining K8s resources
 # 5. Run terraform destroy (handles EKS, VPC, Transit Gateway, RAM share)
-# 6. Remind to delete Cloud Gateway in Konnect (Kong's AWS account)
+# 6. Delete Kong Cloud Gateway in Konnect via API (config, network, control plane)
 #
 # WHY THIS ORDER:
 # The Istio Gateway creates an internal NLB via the AWS LB Controller.
@@ -42,6 +41,10 @@ NC='\033[0m'
 log()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 warn()   { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()  { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# Konnect resource names (must match 02-setup-cloud-gateway.sh)
+CP_NAME="kong-cloud-gateway-eks"
+DCGW_NETWORK_NAME="eks-backend-network"
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks
@@ -213,30 +216,126 @@ terraform_destroy() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: Remind about Konnect cleanup (Kong's AWS account)
+# Step 6: Delete Kong Cloud Gateway in Konnect (via API)
 # ---------------------------------------------------------------------------
-remind_konnect_cleanup() {
-    echo ""
-    echo "=========================================="
-    echo "  Konnect Cleanup Required"
-    echo "=========================================="
-    echo ""
-    echo "The Kong Cloud Gateway runs in KONG'S AWS account (not yours)."
-    echo "It must be deleted separately via:"
-    echo ""
-    echo "  Option A: Konnect UI"
-    echo "    https://cloud.konghq.com -> Gateway Manager -> Delete"
-    echo ""
-    echo "  Option B: Konnect API"
-    echo "    curl -X DELETE \"https://\${KONNECT_REGION}.api.konghq.com/v2/control-planes/\${CP_ID}\" \\"
-    echo "      -H \"Authorization: Bearer \$KONNECT_TOKEN\""
-    echo ""
-    echo "  Option C: Terraform (if using konnect provider)"
-    echo "    terraform destroy -chdir=terraform/konnect"
-    echo ""
-    echo "NOTE: The Transit Gateway attachment on Kong's side will be"
-    echo "automatically cleaned up when the Cloud Gateway is deleted."
-    echo ""
+# Deletion order (reverse of creation):
+#   1. Delete Cloud Gateway configuration (data plane group)
+#   2. Delete Transit Gateway attachments from the network
+#   3. Delete Cloud Gateway network
+#   4. Delete control plane
+#
+# Requires KONNECT_REGION and KONNECT_TOKEN (from .env)
+# ---------------------------------------------------------------------------
+delete_konnect_resources() {
+    log "Step 6: Deleting Kong Cloud Gateway resources in Konnect..."
+
+    if [[ -z "${KONNECT_REGION:-}" || -z "${KONNECT_TOKEN:-}" ]]; then
+        warn "KONNECT_REGION or KONNECT_TOKEN not set. Skipping Konnect cleanup."
+        warn "Delete Cloud Gateway manually: https://cloud.konghq.com → Gateway Manager"
+        return
+    fi
+
+    local regional_api="https://${KONNECT_REGION}.api.konghq.com"
+    local global_api="https://global.api.konghq.com"
+    local auth_header="Authorization: Bearer ${KONNECT_TOKEN}"
+
+    # --- Find control plane by name ---
+    log "  Looking up control plane: ${CP_NAME}"
+    local cp_list
+    cp_list=$(curl -s "${regional_api}/v2/control-planes?filter%5Bname%5D=${CP_NAME}" \
+        -H "$auth_header")
+    local cp_id
+    cp_id=$(echo "$cp_list" | jq -r '.data[0].id // empty')
+
+    if [[ -z "$cp_id" ]]; then
+        log "  Control plane '${CP_NAME}' not found. Nothing to delete."
+        return
+    fi
+    log "  Found control plane: ${cp_id}"
+
+    # --- Delete Cloud Gateway configuration (data plane group) ---
+    log "  Deleting Cloud Gateway configuration..."
+    local configs
+    configs=$(curl -s "${global_api}/v2/cloud-gateways/configurations?filter%5Bcontrol_plane_id%5D=${cp_id}" \
+        -H "$auth_header")
+    local config_id
+    config_id=$(echo "$configs" | jq -r '.data[0].id // empty')
+
+    if [[ -n "$config_id" ]]; then
+        curl -s -X DELETE "${global_api}/v2/cloud-gateways/configurations/${config_id}" \
+            -H "$auth_header" >/dev/null 2>&1 || true
+        log "  Deleted configuration: ${config_id}"
+    else
+        log "  No configuration found."
+    fi
+
+    # --- Find and delete network + transit gateway attachments ---
+    log "  Looking up network: ${DCGW_NETWORK_NAME}"
+    local networks
+    networks=$(curl -s "${global_api}/v2/cloud-gateways/networks" \
+        -H "$auth_header")
+    local network_id
+    network_id=$(echo "$networks" | jq -r \
+        ".data[] | select(.name == \"${DCGW_NETWORK_NAME}\") | .id" | head -1)
+
+    if [[ -n "$network_id" ]]; then
+        # Delete transit gateway attachments first
+        log "  Deleting Transit Gateway attachments from network ${network_id}..."
+        local tgw_list
+        tgw_list=$(curl -s "${global_api}/v2/cloud-gateways/networks/${network_id}/transit-gateways" \
+            -H "$auth_header")
+        local tgw_ids
+        tgw_ids=$(echo "$tgw_list" | jq -r '.data[].id // empty' 2>/dev/null || true)
+
+        if [[ -n "$tgw_ids" ]]; then
+            echo "$tgw_ids" | while read -r tgw_id; do
+                [[ -z "$tgw_id" ]] && continue
+                curl -s -X DELETE \
+                    "${global_api}/v2/cloud-gateways/networks/${network_id}/transit-gateways/${tgw_id}" \
+                    -H "$auth_header" >/dev/null 2>&1 || true
+                log "  Deleted transit gateway attachment: ${tgw_id}"
+            done
+        else
+            log "  No transit gateway attachments found."
+        fi
+
+        # Delete the network
+        log "  Deleting network: ${network_id}"
+        local delete_resp
+        delete_resp=$(curl -s -w "\n%{http_code}" -X DELETE \
+            "${global_api}/v2/cloud-gateways/networks/${network_id}" \
+            -H "$auth_header")
+        local http_code
+        http_code=$(echo "$delete_resp" | tail -1)
+
+        if [[ "$http_code" == "204" || "$http_code" == "200" || "$http_code" == "202" ]]; then
+            log "  Network deleted (or deletion initiated)."
+        else
+            warn "  Network deletion returned HTTP ${http_code}. It may still be deprovisioning."
+            warn "  Check: https://cloud.konghq.com → Gateway Manager → Networks"
+        fi
+    else
+        log "  Network '${DCGW_NETWORK_NAME}' not found."
+    fi
+
+    # --- Delete control plane ---
+    log "  Deleting control plane: ${cp_id}"
+    local cp_delete_resp
+    cp_delete_resp=$(curl -s -w "\n%{http_code}" -X DELETE \
+        "${regional_api}/v2/control-planes/${cp_id}" \
+        -H "$auth_header")
+    local cp_http_code
+    cp_http_code=$(echo "$cp_delete_resp" | tail -1)
+
+    if [[ "$cp_http_code" == "204" || "$cp_http_code" == "200" ]]; then
+        log "  Control plane deleted."
+    else
+        warn "  Control plane deletion returned HTTP ${cp_http_code}."
+        warn "  It may require the network to be fully deprovisioned first."
+        warn "  Check: https://cloud.konghq.com → Gateway Manager"
+    fi
+
+    log "  Konnect cleanup complete."
 }
 
 # ---------------------------------------------------------------------------
@@ -250,15 +349,12 @@ main() {
     echo "================================================="
     echo ""
     echo "This will destroy:"
+    echo "  - Kong Cloud Gateway in Konnect (control plane, network, config)"
     echo "  - Istio Gateway (internal NLB)"
     echo "  - Istio Ambient mesh (istiod, cni, ztunnel)"
     echo "  - All backend applications"
     echo "  - ArgoCD and all managed apps"
     echo "  - EKS cluster, VPC, Transit Gateway"
-    echo ""
-    echo "This will NOT destroy:"
-    echo "  - Kong Cloud Gateway (in Kong's AWS account)"
-    echo "    → Delete separately in Konnect"
     echo ""
 
     local k8s_available=true
@@ -277,11 +373,10 @@ main() {
     fi
 
     terraform_destroy
-    remind_konnect_cleanup
+    delete_konnect_resources
 
     echo ""
-    log "EKS stack teardown complete."
-    log "Remember to delete the Cloud Gateway in Konnect (see above)."
+    log "Full stack teardown complete (EKS + Konnect)."
     echo ""
 }
 
