@@ -27,7 +27,7 @@ graph TB
                 ZT[ztunnel<br/>L4 mTLS]
             end
             subgraph ns_istio_ing [istio-ingress]
-                NLB[Internal NLB<br/>Single Entry Point]
+                NLB[Internal NLB]
                 IGW[Istio Gateway<br/>K8s Gateway API]
                 HR1[/HTTPRoute /healthz/]
                 HR2[/HTTPRoute /app1/]
@@ -143,7 +143,7 @@ graph TB
                         api_n[users-api — ClusterIP]
                     end
                 end
-                INLB[Internal NLB<br/>Single Entry Point<br/>Created by Istio Gateway<br/>+ AWS LB Controller]
+                INLB[Internal NLB<br/>Created by Istio Gateway<br/>+ AWS LB Controller]
             end
             TGW_Y[Transit Gateway<br/>Created by you<br/>Shared to Kong via AWS RAM]
             RT_Y[Route: 192.168.0.0/16 → TGW]
