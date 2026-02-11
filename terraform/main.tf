@@ -133,7 +133,7 @@ module "lb_controller" {
 # Wait for LB Controller to be ready before ArgoCD deploys Istio Gateway
 resource "time_sleep" "wait_for_lb_controller" {
   depends_on      = [module.lb_controller]
-  create_duration = "30s"
+  create_duration = "60s"
 }
 
 # ==============================================================================

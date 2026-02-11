@@ -32,7 +32,7 @@ spec:
         # Run istiod on system nodes
         pilot:
           nodeSelector:
-            role: system
+            node-role: system
           tolerations:
             - key: CriticalAddonsOnly
               operator: Exists
