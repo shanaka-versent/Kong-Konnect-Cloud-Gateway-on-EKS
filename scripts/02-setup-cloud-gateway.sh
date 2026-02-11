@@ -111,6 +111,7 @@ create_control_plane() {
         --data "{
             \"name\": \"${CP_NAME}\",
             \"cluster_type\": \"CLUSTER_TYPE_CONTROL_PLANE\",
+            \"cloud_gateway\": true,
             \"labels\": {
                 \"env\": \"poc\",
                 \"type\": \"cloud-gateway\",
@@ -141,12 +142,12 @@ create_network() {
         -H "Authorization: Bearer $KONNECT_TOKEN")
 
     PROVIDER_ACCOUNT_ID=$(echo "$PROVIDER_ACCOUNTS" | jq -r \
-        ".data[] | select(.provider == \"aws\" and .region_id == \"ap-southeast-2\") | .id" | head -1)
+        '.data[] | select(.provider == "aws") | .id' | head -1)
 
     if [[ -z "$PROVIDER_ACCOUNT_ID" || "$PROVIDER_ACCOUNT_ID" == "null" ]]; then
-        warn "Could not find provider account for ap-southeast-2."
-        warn "Available regions:"
-        echo "$PROVIDER_ACCOUNTS" | jq -r '.data[] | select(.provider == "aws") | "  \(.region_id)"'
+        warn "Could not find AWS provider account."
+        warn "Available providers:"
+        echo "$PROVIDER_ACCOUNTS" | jq -r '.data[] | "  \(.provider) (\(.id))"'
         warn "You may need to create the network manually in Konnect UI."
         return
     fi
@@ -237,12 +238,11 @@ attach_transit_gateway() {
         -H "Content-Type: application/json" \
         --data "{
             \"name\": \"eks-transit-gateway\",
+            \"cidr_blocks\": [\"${EKS_VPC_CIDR}\"],
             \"transit_gateway_attachment_config\": {
                 \"kind\": \"aws-transit-gateway-attachment\",
                 \"transit_gateway_id\": \"${TRANSIT_GATEWAY_ID}\",
-                \"ram_share_arn\": \"${RAM_SHARE_ARN}\",
-                \"dns_config\": [],
-                \"cidr_blocks\": [\"${EKS_VPC_CIDR}\"]
+                \"ram_share_arn\": \"${RAM_SHARE_ARN}\"
             }
         }")
 

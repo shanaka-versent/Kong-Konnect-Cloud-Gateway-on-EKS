@@ -6,7 +6,7 @@
 #
 # IMPORTANT: All services point to the SINGLE Istio Gateway internal NLB.
 # Run ./scripts/03-post-terraform-setup.sh to get the NLB DNS name.
-# Replace <istio-gateway-nlb-dns> with the actual NLB hostname.
+# Replace k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com with the actual NLB hostname.
 #
 # Architecture:
 #   Kong Cloud GW --[Transit GW]--> Internal NLB --> Istio Gateway --> HTTPRoute --> Pod
@@ -25,7 +25,7 @@ _format_version: "3.0"
 # GLOBAL PLUGINS
 # ==============================================================================
 
-plugins:
+# plugins:
   # --------------------------------------------------------------------------
   # CloudFront Bypass Prevention -- Custom Origin Header (Optional)
   # --------------------------------------------------------------------------
@@ -59,7 +59,7 @@ plugins:
 # Kong sends traffic to this NLB with the original path preserved.
 # Istio Gateway uses HTTPRoutes to route to the correct backend pod.
 #
-# Replace <istio-gateway-nlb-dns> with the Istio Gateway NLB hostname from:
+# Replace k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com with the Istio Gateway NLB hostname from:
 #   kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
 #     -o jsonpath='{.status.addresses[0].value}'
 
@@ -68,7 +68,7 @@ services:
   # Users API -- JWT-protected REST API
   # --------------------------------------------------------------------------
   - name: users-api
-    url: http://<istio-gateway-nlb-dns>:80
+    url: http://k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com:80
     protocol: http
     port: 80
     routes:
@@ -113,7 +113,7 @@ services:
   # Tenant App 1
   # --------------------------------------------------------------------------
   - name: tenant-app1
-    url: http://<istio-gateway-nlb-dns>:80
+    url: http://k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com:80
     protocol: http
     port: 80
     routes:
@@ -129,7 +129,7 @@ services:
   # Tenant App 2
   # --------------------------------------------------------------------------
   - name: tenant-app2
-    url: http://<istio-gateway-nlb-dns>:80
+    url: http://k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com:80
     protocol: http
     port: 80
     routes:
@@ -145,7 +145,7 @@ services:
   # Health Check
   # --------------------------------------------------------------------------
   - name: gateway-health
-    url: http://<istio-gateway-nlb-dns>:80
+    url: http://k8s-istioing-kongclou-39ca038537-ddf0792cc0b6cd2e.elb.ap-southeast-2.amazonaws.com:80
     protocol: http
     port: 80
     routes:
