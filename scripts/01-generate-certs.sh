@@ -2,45 +2,61 @@
 # Kong Cloud Gateway on EKS - Generate TLS Certificates for Istio Gateway
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# Generates self-signed TLS certificates for the Istio Gateway HTTPS listener.
-# These certificates are OPTIONAL -- Kong Cloud Gateway can connect to the
-# Istio Gateway internal NLB on port 80 (HTTP).
+# Generates self-signed TLS certificates and creates the Kubernetes TLS
+# secret for the Istio Gateway HTTPS listener (port 443).
 #
-# If you want end-to-end TLS (Kong -> NLB -> Istio Gateway over HTTPS),
-# run this script and create the TLS secret before deploying the Gateway.
+# This enables end-to-end TLS:
+#   Kong Cloud GW --[HTTPS]--> Transit GW --> Internal NLB --> Istio Gateway (TLS Terminate) --[mTLS/Ambient]--> Pods
 #
-# TLS Flow:
-#   Kong Cloud GW --[HTTP/HTTPS]--> Transit GW --> Internal NLB --> Istio Gateway --[mTLS/Ambient]--> Pods
+# The script:
+#   1. Generates a self-signed CA + server certificate
+#   2. Creates the 'istio-gateway-tls' secret in the istio-ingress namespace
+#
+# Usage:
+#   ./scripts/01-generate-certs.sh [domain]
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CERTS_DIR="${SCRIPT_DIR}/../certs"
 DOMAIN="${1:-kong-cloud-gw-poc.local}"
 GATEWAY_NAME="kong-cloud-gw-gateway"
+NAMESPACE="istio-ingress"
+SECRET_NAME="istio-gateway-tls"
 
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+
+echo ""
 echo "=== Generating TLS Certificates for Istio Gateway ==="
 echo ""
 echo "Domain: ${DOMAIN}"
-echo "Output directory: ${CERTS_DIR}"
+echo "Output: ${CERTS_DIR}"
+echo ""
 
 mkdir -p "${CERTS_DIR}"
 
-# Generate CA private key
-echo "Generating CA private key..."
+# ---------------------------------------------------------------------------
+# Step 1: Generate CA
+# ---------------------------------------------------------------------------
+log "Generating CA private key..."
 openssl genrsa -out "${CERTS_DIR}/ca.key" 4096
 
-# Generate CA certificate
-echo "Generating CA certificate..."
+log "Generating CA certificate..."
 openssl req -new -x509 -days 365 -key "${CERTS_DIR}/ca.key" \
   -out "${CERTS_DIR}/ca.crt" \
   -subj "/C=AU/ST=NSW/L=Sydney/O=Kong Cloud GW POC/CN=Kong Cloud GW POC CA"
 
-# Generate server private key
-echo "Generating server private key..."
+# ---------------------------------------------------------------------------
+# Step 2: Generate server certificate
+# ---------------------------------------------------------------------------
+log "Generating server private key..."
 openssl genrsa -out "${CERTS_DIR}/server.key" 2048
 
-# Create OpenSSL config for SAN
 cat > "${CERTS_DIR}/server.cnf" << EOF
 [req]
 default_bits = 2048
@@ -63,18 +79,16 @@ subjectAltName = @alt_names
 DNS.1 = ${DOMAIN}
 DNS.2 = *.${DOMAIN}
 DNS.3 = localhost
-DNS.4 = ${GATEWAY_NAME}-istio.istio-ingress.svc.cluster.local
+DNS.4 = ${GATEWAY_NAME}-istio.${NAMESPACE}.svc.cluster.local
 IP.1 = 127.0.0.1
 EOF
 
-# Generate server CSR
-echo "Generating server CSR..."
+log "Generating server CSR..."
 openssl req -new -key "${CERTS_DIR}/server.key" \
   -out "${CERTS_DIR}/server.csr" \
   -config "${CERTS_DIR}/server.cnf"
 
-# Sign server certificate with CA
-echo "Signing server certificate..."
+log "Signing server certificate with CA..."
 openssl x509 -req -days 365 \
   -in "${CERTS_DIR}/server.csr" \
   -CA "${CERTS_DIR}/ca.crt" \
@@ -84,27 +98,52 @@ openssl x509 -req -days 365 \
   -extensions req_ext \
   -extfile "${CERTS_DIR}/server.cnf"
 
-# Cleanup
 rm -f "${CERTS_DIR}/server.csr" "${CERTS_DIR}/server.cnf" "${CERTS_DIR}/ca.srl"
 
 echo ""
-echo "=== Certificates Generated Successfully ==="
-echo ""
-echo "Files created:"
+log "Certificates generated:"
 echo "  CA Certificate:     ${CERTS_DIR}/ca.crt"
 echo "  Server Certificate: ${CERTS_DIR}/server.crt"
 echo "  Server Key:         ${CERTS_DIR}/server.key"
+
+# ---------------------------------------------------------------------------
+# Step 3: Create Kubernetes TLS secret
+# ---------------------------------------------------------------------------
 echo ""
-echo "=== Next Steps ==="
+
+if ! command -v kubectl &>/dev/null; then
+    warn "kubectl not found. Create the secret manually:"
+    echo "  kubectl create secret tls ${SECRET_NAME} \\"
+    echo "    --cert=${CERTS_DIR}/server.crt \\"
+    echo "    --key=${CERTS_DIR}/server.key \\"
+    echo "    -n ${NAMESPACE}"
+    exit 0
+fi
+
+if ! kubectl cluster-info &>/dev/null 2>&1; then
+    warn "Cannot connect to Kubernetes cluster. Create the secret manually:"
+    echo "  kubectl create secret tls ${SECRET_NAME} \\"
+    echo "    --cert=${CERTS_DIR}/server.crt \\"
+    echo "    --key=${CERTS_DIR}/server.key \\"
+    echo "    -n ${NAMESPACE}"
+    exit 0
+fi
+
+# Ensure namespace exists
+kubectl create namespace "${NAMESPACE}" 2>/dev/null || true
+
+# Delete existing secret if present (for re-runs)
+if kubectl get secret "${SECRET_NAME}" -n "${NAMESPACE}" &>/dev/null; then
+    log "Replacing existing TLS secret..."
+    kubectl delete secret "${SECRET_NAME}" -n "${NAMESPACE}"
+fi
+
+log "Creating TLS secret '${SECRET_NAME}' in namespace '${NAMESPACE}'..."
+kubectl create secret tls "${SECRET_NAME}" \
+  --cert="${CERTS_DIR}/server.crt" \
+  --key="${CERTS_DIR}/server.key" \
+  -n "${NAMESPACE}"
+
 echo ""
-echo "1. Create the Kubernetes TLS secret for Istio Gateway:"
-echo ""
-echo "   kubectl create namespace istio-ingress"
-echo "   kubectl create secret tls istio-gateway-tls \\"
-echo "     --cert=${CERTS_DIR}/server.crt \\"
-echo "     --key=${CERTS_DIR}/server.key \\"
-echo "     -n istio-ingress"
-echo ""
-echo "2. The HTTPS listener on the Gateway will use this secret."
-echo "   Kong Cloud Gateway can connect on port 80 (HTTP) or 443 (HTTPS)."
+log "TLS secret created. Istio Gateway HTTPS listener (port 443) is ready."
 echo ""

@@ -114,7 +114,7 @@ graph LR
 | NLB → Istio Gateway | TLS | TLS passthrough (NLB L4) | Istio Gateway (port 443) |
 | Istio Gateway → Pod | HTTP | Istio Ambient mTLS (ztunnel L4) | Backend pod |
 
-> The Istio Gateway listens on both port 80 (HTTP) and port 443 (HTTPS with `tls.mode: Terminate`). Kong connects on port 443 for end-to-end encryption. The `istio-gateway-tls` secret holds the TLS certificate — generate it with `./scripts/01-generate-certs.sh`.
+> The Istio Gateway listens on port 80 (HTTP) and port 443 (HTTPS with `tls.mode: Terminate`). Kong connects on port 443 for end-to-end encryption. The `istio-gateway-tls` secret is created automatically by `./scripts/01-generate-certs.sh`.
 
 ### Traffic Flow
 
@@ -152,7 +152,7 @@ sequenceDiagram
     CF-->>-C: HTTPS Response
 ```
 
-### Private Connectivity Between Accounts
+### Private Connectivity
 
 ```mermaid
 graph TB
@@ -227,8 +227,6 @@ How it works:
 3. **Kong** attaches their Cloud Gateway VPC to your Transit Gateway
 4. Route tables on both sides direct cross-VPC traffic through the Transit Gateway
 5. A security group rule allows inbound from Kong's CIDR (`192.168.0.0/16`)
-
----
 
 ### Security Layers
 
@@ -316,7 +314,11 @@ flowchart TB
 
 ---
 
-## Deployment Layers
+## Deployment
+
+### Deployment Layers
+
+The stack is deployed in six layers — Terraform provisions infrastructure, ArgoCD handles K8s resources via GitOps, and Kong Konnect manages the external API gateway.
 
 ```mermaid
 graph TB
@@ -367,10 +369,6 @@ graph TB
     style L6 fill:#E8E8E8,stroke:#999,color:#333
 ```
 
----
-
-## Deployment
-
 ### Step 1: Configure Konnect Credentials
 
 ```bash
@@ -394,7 +392,7 @@ terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-This creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF, and ArgoCD.
+This creates: VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF, and ArgoCD.
 
 ### Step 3: Configure kubectl
 
@@ -422,7 +420,15 @@ ArgoCD deploys everything via **sync waves** in dependency order:
 | 6 | HTTPRoutes | Path-based routing + ReferenceGrants |
 | 7 | Applications | Backend services (all ClusterIP) |
 
-### Step 5: Set Up Kong Cloud Gateway
+### Step 5: Generate TLS Certificates
+
+```bash
+./scripts/01-generate-certs.sh
+```
+
+This generates a self-signed CA + server certificate and **automatically creates** the `istio-gateway-tls` Kubernetes secret in the `istio-ingress` namespace. The Istio Gateway HTTPS listener (port 443) uses this secret for TLS termination, completing the end-to-end encryption chain.
+
+### Step 6: Set Up Kong Cloud Gateway
 
 ```bash
 ./scripts/02-setup-cloud-gateway.sh
@@ -433,15 +439,15 @@ This creates the Konnect control plane (with `cloud_gateway: true`), provisions 
 Once the network reaches `ready` state (~30 minutes), accept the Transit Gateway attachment in AWS Console:
 **VPC → Transit Gateway Attachments → Accept**
 
-### Step 6: Configure Kong Routes
+### Step 7: Configure Kong Routes
 
-Get the Istio Gateway NLB endpoint and update `deck/kong.yaml`:
+Get the Istio Gateway NLB endpoint:
 
 ```bash
 ./scripts/03-post-terraform-setup.sh
 ```
 
-Replace `<istio-gateway-nlb-dns>` in `deck/kong.yaml` with the NLB hostname from the script output. All services point to the **same** NLB — Istio Gateway uses HTTPRoutes to route to the correct backend:
+Update `deck/kong.yaml` with the NLB hostname from the script output. All services point to the **same** NLB — Istio Gateway uses HTTPRoutes to route to the correct backend:
 
 ```yaml
 services:
@@ -459,20 +465,6 @@ deck gateway sync deck/kong.yaml \
   --konnect-token $KONNECT_TOKEN \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
-
-### Step 7: Generate TLS Certificates
-
-Generate and deploy the TLS certificate for the Istio Gateway HTTPS listener:
-
-```bash
-./scripts/01-generate-certs.sh
-kubectl create secret tls istio-gateway-tls \
-  --cert=certs/server.crt \
-  --key=certs/server.key \
-  -n istio-ingress
-```
-
-This enables TLS termination at the Istio Gateway (port 443), completing the end-to-end encryption chain.
 
 ---
 
@@ -495,6 +487,9 @@ kubectl get pods -n gateway-health
 kubectl get pods -n sample-apps
 kubectl get pods -n api-services
 
+# TLS secret
+kubectl get secret istio-gateway-tls -n istio-ingress
+
 # End-to-end test via Kong Cloud Gateway
 export KONG_URL="https://<kong-cloud-gw-proxy-url>"
 curl $KONG_URL/healthz
@@ -513,7 +508,7 @@ kubectl port-forward svc/argocd-server -n argocd 8080:80
 
 ---
 
-## Konnect UI — Analytics & Configuration
+## Konnect UI
 
 Once deployed, everything is visible and configurable at [cloud.konghq.com](https://cloud.konghq.com):
 
