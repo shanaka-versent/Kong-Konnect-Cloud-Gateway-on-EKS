@@ -1,0 +1,101 @@
+# Kong Cloud Gateway on EKS - HTTPRoutes for Kubernetes Gateway API
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# These route traffic from the Istio Gateway to backend services.
+# Kong Cloud Gateway sends traffic to the single Istio Gateway NLB,
+# which then uses these HTTPRoutes for path-based routing to pods.
+#
+# IMPORTANT: This uses HTTPRoute (Gateway API), NOT Ingress resources
+
+---
+# Health Route - handles /healthz paths
+# Used by Kong Cloud Gateway for health checks
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: health-route
+  namespace: gateway-health
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /healthz
+      backendRefs:
+        - name: health-responder
+          port: 80
+
+---
+# App 1 Route - handles /app1 paths
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app1-route
+  namespace: sample-apps
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /app1
+      backendRefs:
+        - name: sample-app-1
+          port: 80
+
+---
+# App 2 Route - handles /app2 paths
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app2-route
+  namespace: sample-apps
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /app2
+      backendRefs:
+        - name: sample-app-2
+          port: 80
+
+---
+# ReferenceGrants - allow HTTPRoutes to reference services across namespaces
+
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway-health
+  namespace: gateway-health
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: gateway-health
+  to:
+    - group: ""
+      kind: Service
+
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-sample-apps
+  namespace: sample-apps
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: sample-apps
+  to:
+    - group: ""
+      kind: Service

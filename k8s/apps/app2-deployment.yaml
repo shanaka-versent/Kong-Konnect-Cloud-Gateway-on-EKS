@@ -1,22 +1,25 @@
-# Sample App 1 Deployment
+# Kong Cloud Gateway on EKS - Sample Application 2
 # @author Shanaka Jayasundera - shanakaj@gmail.com
+# Demonstrates routing via /app2 path through Istio Gateway
 
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: sample-app-1
-  namespace: tenant-app1
+  name: sample-app-2
+  namespace: sample-apps
   labels:
-    app: sample-app-1
+    app: sample-app-2
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: sample-app-1
+      app: sample-app-2
   template:
     metadata:
       labels:
-        app: sample-app-1
+        app: sample-app-2
+        version: v1
     spec:
       containers:
         - name: nginx
@@ -27,22 +30,32 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              cat > /etc/nginx/conf.d/default.conf << 'EOF'
+              cat > /etc/nginx/conf.d/default.conf << 'NGINX_EOF'
               server {
                   listen 8080;
                   server_name _;
 
-                  location /app1 {
+                  location /app2 {
                       default_type text/plain;
-                      return 200 'Hello from App 1!\nHostname: $hostname\nPath: $request_uri\n';
+                      return 200 'Hello from App 2!\nHostname: $hostname\nPath: $request_uri\n';
                   }
 
-                  location /health {
-                      return 200 'healthy';
-                      add_header Content-Type text/plain;
+                  location /app2/info {
+                      default_type application/json;
+                      return 200 '{"app":"sample-app-2","version":"1.0","namespace":"sample-apps"}\n';
+                  }
+
+                  location /app2/health {
+                      default_type text/plain;
+                      return 200 'healthy\n';
+                  }
+
+                  location / {
+                      default_type text/plain;
+                      return 200 'Sample App 2 - Use /app2 endpoint\n';
                   }
               }
-              EOF
+              NGINX_EOF
               nginx -g 'daemon off;'
           resources:
             requests:
@@ -53,13 +66,13 @@ spec:
               memory: 64Mi
           livenessProbe:
             httpGet:
-              path: /health
+              path: /app2/health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /health
+              path: /app2/health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5

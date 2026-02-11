@@ -21,6 +21,15 @@
 
 set -euo pipefail
 
+# Auto-source .env if it exists (contains KONNECT_TOKEN etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -36,6 +45,26 @@ CP_NAME="kong-cloud-gateway-eks"
 DCGW_NETWORK_NAME="eks-backend-network"
 DCGW_CIDR="192.168.0.0/16"
 KONG_GW_VERSION="3.9"
+
+# ---------------------------------------------------------------------------
+# Auto-populate Transit Gateway values from Terraform outputs
+# ---------------------------------------------------------------------------
+populate_from_terraform() {
+    local tf_dir="${SCRIPT_DIR}/../terraform"
+
+    if [[ -d "${tf_dir}/.terraform" ]]; then
+        log "Reading Transit Gateway values from Terraform outputs..."
+        if [[ -z "${TRANSIT_GATEWAY_ID:-}" ]]; then
+            TRANSIT_GATEWAY_ID=$(terraform -chdir="$tf_dir" output -raw transit_gateway_id 2>/dev/null || true)
+        fi
+        if [[ -z "${RAM_SHARE_ARN:-}" ]]; then
+            RAM_SHARE_ARN=$(terraform -chdir="$tf_dir" output -raw ram_share_arn 2>/dev/null || true)
+        fi
+        if [[ -z "${EKS_VPC_CIDR:-}" ]]; then
+            EKS_VPC_CIDR=$(terraform -chdir="$tf_dir" output -raw vpc_cidr 2>/dev/null || true)
+        fi
+    fi
+}
 
 # ---------------------------------------------------------------------------
 # Validate environment variables
@@ -55,12 +84,11 @@ validate_env() {
     if [[ "$missing" == true ]]; then
         echo ""
         echo "Usage:"
-        echo "  export KONNECT_REGION=\"au\""
-        echo "  export KONNECT_TOKEN=\"kpat_xxx...\""
-        echo "  export TRANSIT_GATEWAY_ID=\"tgw-xxx\"    # Optional: for Transit GW setup"
-        echo "  export RAM_SHARE_ARN=\"arn:aws:ram:...\"  # Optional: for Transit GW setup"
-        echo "  export EKS_VPC_CIDR=\"10.0.0.0/16\"      # Optional: for Transit GW setup"
-        echo "  ./scripts/01-setup-cloud-gateway.sh"
+        echo "  1. Copy .env.example to .env and set KONNECT_REGION and KONNECT_TOKEN"
+        echo "     cp .env.example .env"
+        echo ""
+        echo "  2. Run this script (Transit Gateway values are auto-read from Terraform):"
+        echo "     ./scripts/02-setup-cloud-gateway.sh"
         exit 1
     fi
 }
@@ -270,6 +298,7 @@ main() {
     echo "=============================================="
     echo ""
 
+    populate_from_terraform
     validate_env
     create_control_plane
     create_network
