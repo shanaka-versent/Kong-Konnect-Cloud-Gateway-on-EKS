@@ -2,7 +2,9 @@
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # This root application manages all child applications.
-# Apply this after Terraform deployment to bootstrap the cluster.
+# Bootstrapped automatically by Terraform via the argocd-apps Helm chart.
+# Manual apply is only needed if Terraform bootstrap is skipped:
+#   kubectl apply -f argocd/apps/root-app.yaml
 #
 # ArgoCD manages Layers 3 & 4:
 # ============================

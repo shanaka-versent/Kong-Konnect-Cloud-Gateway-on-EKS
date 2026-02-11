@@ -210,6 +210,12 @@ variable "argocd_service_type" {
   default     = "ClusterIP"
 }
 
+variable "argocd_git_repo_url" {
+  description = "Git repository URL for ArgoCD root app (App of Apps pattern)"
+  type        = string
+  default     = "https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git"
+}
+
 # Kong Cloud Gateway CIDR (default: 192.168.0.0/16)
 # This is the CIDR block used by Kong's Dedicated Cloud Gateway network.
 # Must not overlap with your VPC CIDR.

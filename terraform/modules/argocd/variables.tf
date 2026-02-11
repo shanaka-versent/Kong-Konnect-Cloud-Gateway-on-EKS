@@ -23,3 +23,8 @@ variable "cluster_dependency" {
   description = "Cluster dependency for ordering"
   type        = string
 }
+
+variable "git_repo_url" {
+  description = "Git repository URL for ArgoCD root app (App of Apps)"
+  type        = string
+}
