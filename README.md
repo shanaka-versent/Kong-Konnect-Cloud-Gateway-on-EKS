@@ -13,20 +13,20 @@ graph TB
     Client([Client])
     CF[CloudFront + WAF<br/>Edge Security + Origin mTLS]
 
-    subgraph "Kong's AWS Account (192.168.0.0/16)"
+    subgraph kong_acct ["Kong's AWS Account (192.168.0.0/16)"]
         Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>JWT · Rate Limit · CORS · Analytics]
     end
 
     TGW[AWS Transit Gateway<br/>Private Connectivity<br/>Shared via RAM]
 
-    subgraph "Your AWS Account (10.0.0.0/16)"
-        subgraph EKS Cluster
-            subgraph istio-system
+    subgraph your_acct ["Your AWS Account (10.0.0.0/16)"]
+        subgraph eks_cluster [EKS Cluster]
+            subgraph ns_istio_sys [istio-system]
                 Istiod[istiod<br/>Control Plane]
                 CNI[istio-cni<br/>DaemonSet]
                 ZT[ztunnel<br/>L4 mTLS]
             end
-            subgraph istio-ingress
+            subgraph ns_istio_ing [istio-ingress]
                 NLB[Internal NLB<br/>Single Entry Point]
                 IGW[Istio Gateway<br/>K8s Gateway API]
                 HR1[/HTTPRoute /healthz/]
@@ -34,14 +34,14 @@ graph TB
                 HR3[/HTTPRoute /app2/]
                 HR4[/HTTPRoute /api/users/]
             end
-            subgraph gateway-health
+            subgraph ns_gw_health [gateway-health]
                 Health[health-responder<br/>ClusterIP]
             end
-            subgraph sample-apps
+            subgraph ns_sample [sample-apps]
                 App1[sample-app-1<br/>ClusterIP]
                 App2[sample-app-2<br/>ClusterIP]
             end
-            subgraph api-services
+            subgraph ns_api [api-services]
                 API[users-api<br/>ClusterIP]
             end
         end
@@ -76,6 +76,14 @@ graph TB
     style HR2 fill:#7B68EE,color:#fff
     style HR3 fill:#7B68EE,color:#fff
     style HR4 fill:#7B68EE,color:#fff
+    style kong_acct fill:#E8E8E8,stroke:#999,color:#333
+    style your_acct fill:#E8E8E8,stroke:#999,color:#333
+    style eks_cluster fill:#F0F0F0,stroke:#BBB,color:#333
+    style ns_istio_sys fill:#F5F5F5,stroke:#CCC,color:#333
+    style ns_istio_ing fill:#F5F5F5,stroke:#CCC,color:#333
+    style ns_gw_health fill:#F5F5F5,stroke:#CCC,color:#333
+    style ns_sample fill:#F5F5F5,stroke:#CCC,color:#333
+    style ns_api fill:#F5F5F5,stroke:#CCC,color:#333
 ```
 
 ### Traffic Flow
@@ -112,7 +120,7 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph "Your AWS Account"
+    subgraph your_acct2 ["Your AWS Account"]
         subgraph VPC ["VPC (10.0.0.0/16)"]
             subgraph PrivSubnets [Private Subnets]
                 subgraph EKSNodes [EKS Nodes]
@@ -124,14 +132,14 @@ graph TB
                     subgraph ns_istio_ingress ["istio-ingress namespace"]
                         gw_pod[Istio Gateway Pod]
                     end
-                    subgraph ns_gw_health ["gateway-health namespace"]
+                    subgraph ns_gw_health2 ["gateway-health namespace"]
                         health_n[health-responder — ClusterIP]
                     end
                     subgraph ns_sample_apps ["sample-apps namespace"]
                         app1_n[sample-app-1 — ClusterIP]
                         app2_n[sample-app-2 — ClusterIP]
                     end
-                    subgraph ns_api ["api-services namespace"]
+                    subgraph ns_api2 ["api-services namespace"]
                         api_n[users-api — ClusterIP]
                     end
                 end
@@ -143,7 +151,7 @@ graph TB
         end
     end
 
-    subgraph "Kong's AWS Account"
+    subgraph kong_acct2 ["Kong's AWS Account"]
         subgraph KVPC ["DCGW VPC (192.168.0.0/16)"]
             KDP[Kong Data Plane Pods<br/>Auto-scaled · Fully Managed]
             KNLB[Kong Cloud GW NLB<br/>Public · Internet-Facing]
@@ -163,6 +171,17 @@ graph TB
     style KDP fill:#003459,color:#fff
     style gw_pod fill:#466BB0,color:#fff
     style istiod_n fill:#466BB0,color:#fff
+    style your_acct2 fill:#E8E8E8,stroke:#999,color:#333
+    style kong_acct2 fill:#E8E8E8,stroke:#999,color:#333
+    style VPC fill:#F0F0F0,stroke:#BBB,color:#333
+    style KVPC fill:#F0F0F0,stroke:#BBB,color:#333
+    style PrivSubnets fill:#F5F5F5,stroke:#CCC,color:#333
+    style EKSNodes fill:#FAFAFA,stroke:#DDD,color:#333
+    style ns_istio_system fill:#FAFAFA,stroke:#DDD,color:#333
+    style ns_istio_ingress fill:#FAFAFA,stroke:#DDD,color:#333
+    style ns_gw_health2 fill:#FAFAFA,stroke:#DDD,color:#333
+    style ns_sample_apps fill:#FAFAFA,stroke:#DDD,color:#333
+    style ns_api2 fill:#FAFAFA,stroke:#DDD,color:#333
 ```
 
 How it works:
@@ -378,33 +397,33 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 
 ```mermaid
 graph LR
-    subgraph "Layer 1: Cloud Foundations — Terraform"
+    subgraph L1 ["Layer 1: Cloud Foundations — Terraform"]
         VPC["VPC (10.0.0.0/16)<br/>Subnets · NAT · IGW"]
     end
 
-    subgraph "Layer 2: EKS Platform — Terraform"
+    subgraph L2 ["Layer 2: EKS Platform — Terraform"]
         EKS[EKS Cluster + Nodes]
         LBC[AWS LB Controller]
         TGW2[Transit Gateway + RAM]
         ArgoCD2[ArgoCD]
     end
 
-    subgraph "Layer 3: Service Mesh — ArgoCD"
+    subgraph L3 ["Layer 3: Service Mesh — ArgoCD"]
         CRDs[Gateway API CRDs]
         Istio[Istio Ambient<br/>base · istiod · cni · ztunnel]
         GW[Istio Gateway<br/>Single Internal NLB]
         Routes[HTTPRoutes<br/>+ ReferenceGrants]
     end
 
-    subgraph "Layer 4: Applications — ArgoCD"
+    subgraph L4 ["Layer 4: Applications — ArgoCD"]
         Apps[Backend Services<br/>All ClusterIP]
     end
 
-    subgraph "Layer 5: API Config — Kong Konnect"
+    subgraph L5 ["Layer 5: API Config — Kong Konnect"]
         KongGW[Kong Cloud Gateway<br/>Routes · Plugins · Consumers<br/>Connects via Transit Gateway]
     end
 
-    subgraph "Layer 6: Edge Security — Terraform"
+    subgraph L6 ["Layer 6: Edge Security — Terraform"]
         CFront[CloudFront + WAF<br/>Origin mTLS]
     end
 
@@ -416,4 +435,11 @@ graph LR
     Routes --> Apps
     Apps -.->|Transit GW| KongGW
     KongGW -.-> CFront
+
+    style L1 fill:#E8E8E8,stroke:#999,color:#333
+    style L2 fill:#E8E8E8,stroke:#999,color:#333
+    style L3 fill:#F0F0F0,stroke:#BBB,color:#333
+    style L4 fill:#F0F0F0,stroke:#BBB,color:#333
+    style L5 fill:#E8E8E8,stroke:#999,color:#333
+    style L6 fill:#E8E8E8,stroke:#999,color:#333
 ```
