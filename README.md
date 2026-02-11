@@ -49,9 +49,9 @@ graph TB
 
     Client -->|HTTPS| CF
     CF -->|HTTPS + Origin mTLS| Kong
-    Kong -->|Private via TGW| TGW
+    Kong -->|HTTPS via TGW| TGW
     TGW --> NLB
-    NLB --> IGW
+    NLB -->|TLS Terminate| IGW
     IGW --> HR1
     IGW --> HR2
     IGW --> HR3
@@ -88,14 +88,14 @@ graph TB
 
 ### End-to-End Encryption
 
-TLS terminates and re-encrypts at each trust boundary. Traffic is never unencrypted on public networks.
+TLS terminates and re-encrypts at each trust boundary. Traffic is encrypted at every hop.
 
 ```mermaid
 graph LR
     C([Client]) -->|"🔒 TLS 1.3"| CF
     CF[CloudFront<br/>+ WAF] -->|"🔒 HTTPS +<br/>Origin mTLS cert"| Kong
-    Kong[Kong Cloud<br/>Gateway] -->|"HTTP — private<br/>AWS backbone<br/>via Transit GW"| NLB[Internal<br/>NLB]
-    NLB -->|"HTTP"| IGW[Istio<br/>Gateway]
+    Kong[Kong Cloud<br/>Gateway] -->|"🔒 HTTPS<br/>via Transit GW"| NLB[Internal<br/>NLB]
+    NLB -->|"🔒 TLS"| IGW[Istio Gateway<br/>TLS Terminate]
     IGW -->|"🔒 mTLS<br/>ztunnel L4"| Pod[Backend<br/>Pod]
 
     style C fill:#fff,stroke:#333,color:#333
@@ -110,42 +110,46 @@ graph LR
 |-----|----------|-----------|---------------|
 | Client → CloudFront | HTTPS | TLS 1.2/1.3 (AWS-managed cert) | CloudFront edge |
 | CloudFront → Kong | HTTPS | TLS + Origin mTLS client certificate | Kong Cloud Gateway |
-| Kong → NLB (via TGW) | HTTP | None (private AWS backbone, no internet) | — |
+| Kong → NLB (via TGW) | HTTPS | TLS (private AWS backbone via Transit GW) | Istio Gateway |
+| NLB → Istio Gateway | TLS | TLS passthrough (NLB L4) | Istio Gateway (port 443) |
 | Istio Gateway → Pod | HTTP | Istio Ambient mTLS (ztunnel L4) | Backend pod |
 
-> **Note:** The Kong → NLB segment uses HTTP over private Transit Gateway connectivity (never traverses the public internet). For full end-to-end TLS on this segment, see Step 7 (Optional TLS Certificates) which adds TLS termination at the Istio Gateway.
+> The Istio Gateway listens on both port 80 (HTTP) and port 443 (HTTPS with `tls.mode: Terminate`). Kong connects on port 443 for end-to-end encryption. The `istio-gateway-tls` secret holds the TLS certificate — generate it with `./scripts/01-generate-certs.sh`.
 
 ### Traffic Flow
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant CF as CloudFront + WAF
-    box Kong's AWS Account
-        participant K as Kong Cloud Gateway
-    end
+    participant CF as CloudFront<br/>(+ WAF)
+    participant K as Kong Cloud GW<br/>(Kong's AWS Account)
     participant TGW as Transit Gateway
-    box Your AWS Account — EKS
-        participant NLB as Internal NLB
-        participant IG as Istio Gateway
-        participant HR as HTTPRoute
-        participant ZT as ztunnel
-        participant P as Backend Pod
-    end
+    participant NLB as Internal NLB<br/>(Private)
+    participant IG as Istio Gateway<br/>(Pod)
+    participant App as Backend App<br/>(Pod)
 
-    C->>CF: HTTPS (TLS 1.3)
-    Note over CF: TLS terminates<br/>WAF inspection
-    CF->>K: HTTPS + Origin mTLS cert
-    Note over K: TLS terminates<br/>JWT Auth, Rate Limiting,<br/>CORS, Request Transform
-    K->>TGW: HTTP (private network)
-    Note over TGW: 192.168.0.0/16 ↔ 10.0.0.0/16
-    TGW->>NLB: HTTP (AWS backbone)
-    NLB->>IG: HTTP
-    IG->>HR: Match path (/app1, /api/users, etc.)
-    HR->>ZT: Route to ClusterIP Service
-    Note over ZT: Istio Ambient<br/>mTLS encryption (L4)
-    ZT->>P: mTLS encrypted
-    P-->>C: Response (reverse path)
+    Note over C,CF: TLS Session 1 (Edge)
+    C->>+CF: HTTPS :443<br/>TLS 1.3 (AWS-managed cert)
+    CF->>CF: TLS Termination<br/>WAF Inspection
+
+    Note over CF,K: TLS Session 2 (Origin mTLS)
+    CF->>+K: HTTPS :443<br/>Origin mTLS client certificate
+    K->>K: TLS Termination<br/>JWT Auth, Rate Limiting,<br/>CORS, Request Transform
+
+    Note over K,IG: TLS Session 3 (Backend)
+    K->>+TGW: HTTPS :443<br/>Re-encrypted (private network)
+    TGW->>+NLB: HTTPS :443<br/>AWS backbone (192.168.0.0/16 ↔ 10.0.0.0/16)
+    NLB->>+IG: HTTPS :443<br/>TLS Passthrough (L4)
+    IG->>IG: TLS Termination<br/>(istio-gateway-tls secret)
+
+    Note over IG,App: Plain HTTP (mTLS via Ambient)
+    IG->>+App: HTTP :8080<br/>Istio Ambient mTLS (ztunnel L4)
+    App-->>-IG: Response
+    IG-->>-NLB: Response
+    NLB-->>-TGW: Response
+    TGW-->>-K: Response
+    K-->>-CF: Response
+    CF-->>-C: HTTPS Response
 ```
 
 ### Private Connectivity Between Accounts
@@ -393,9 +397,9 @@ deck gateway sync deck/kong.yaml \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
 
-### Step 7 (Optional): TLS Certificates
+### Step 7: Generate TLS Certificates
 
-For end-to-end TLS (Kong → NLB → Istio Gateway over HTTPS):
+Generate and deploy the TLS certificate for the Istio Gateway HTTPS listener:
 
 ```bash
 ./scripts/01-generate-certs.sh
@@ -404,6 +408,8 @@ kubectl create secret tls istio-gateway-tls \
   --key=certs/server.key \
   -n istio-ingress
 ```
+
+This enables TLS termination at the Istio Gateway (port 443), completing the end-to-end encryption chain.
 
 ---
 
