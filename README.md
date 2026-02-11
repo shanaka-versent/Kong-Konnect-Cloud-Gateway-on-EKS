@@ -385,30 +385,18 @@ KONNECT_CONTROL_PLANE_NAME="kong-cloud-gateway-eks"
 
 > `.env` is **gitignored** — your token never gets committed. All scripts auto-source it. Transit Gateway IDs and NLB DNS are **auto-read from Terraform** — no manual entry needed.
 
-### Step 2: Deploy Infrastructure
+### Step 2: Deploy Infrastructure + GitOps
 
 ```bash
 terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-This creates: VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF, and ArgoCD.
+This creates **everything** in one shot:
+- VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF
+- ArgoCD + **root application** (App of Apps) — bootstrapped automatically via the `argocd-apps` Helm chart
 
-### Step 3: Configure kubectl
-
-```bash
-aws eks update-kubeconfig \
-  --name $(terraform -chdir=terraform output -raw cluster_name) \
-  --region ap-southeast-2
-```
-
-### Step 4: Deploy ArgoCD Root App
-
-```bash
-kubectl apply -f argocd/apps/root-app.yaml
-```
-
-ArgoCD deploys everything via **sync waves** in dependency order:
+ArgoCD immediately begins syncing all child apps via **sync waves** in dependency order:
 
 | Wave | Component | What it deploys |
 |------|-----------|----------------|
@@ -420,7 +408,17 @@ ArgoCD deploys everything via **sync waves** in dependency order:
 | 6 | HTTPRoutes | Path-based routing + ReferenceGrants |
 | 7 | Applications | Backend services (all ClusterIP) |
 
-### Step 5: Generate TLS Certificates
+> No manual `kubectl apply` needed — Terraform bootstraps ArgoCD and the root app automatically.
+
+### Step 3: Configure kubectl
+
+```bash
+aws eks update-kubeconfig \
+  --name $(terraform -chdir=terraform output -raw cluster_name) \
+  --region ap-southeast-2
+```
+
+### Step 4: Generate TLS Certificates
 
 ```bash
 ./scripts/01-generate-certs.sh
@@ -428,7 +426,7 @@ ArgoCD deploys everything via **sync waves** in dependency order:
 
 This generates a self-signed CA + server certificate and **automatically creates** the `istio-gateway-tls` Kubernetes secret in the `istio-ingress` namespace. The Istio Gateway HTTPS listener (port 443) uses this secret for TLS termination, completing the end-to-end encryption chain.
 
-### Step 6: Set Up Kong Cloud Gateway
+### Step 5: Set Up Kong Cloud Gateway
 
 ```bash
 ./scripts/02-setup-cloud-gateway.sh
@@ -439,7 +437,7 @@ This creates the Konnect control plane (with `cloud_gateway: true`), provisions 
 Once the network reaches `ready` state (~30 minutes), accept the Transit Gateway attachment in AWS Console:
 **VPC → Transit Gateway Attachments → Accept**
 
-### Step 7: Configure Kong Routes
+### Step 6: Configure Kong Routes
 
 Get the Istio Gateway NLB endpoint:
 

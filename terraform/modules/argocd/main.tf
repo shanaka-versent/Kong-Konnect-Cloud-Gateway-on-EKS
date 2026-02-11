@@ -1,5 +1,18 @@
 # ArgoCD Module
 # @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# Installs ArgoCD via Helm and bootstraps the root application
+# using the argocd-apps chart (App of Apps pattern).
+# After terraform apply, ArgoCD automatically syncs all child apps
+# from the Git repository — no manual kubectl step needed.
+
+locals {
+  tolerations = [{
+    key      = "CriticalAddonsOnly"
+    operator = "Exists"
+    effect   = "NoSchedule"
+  }]
+}
 
 resource "helm_release" "argocd" {
   name             = "argocd"
@@ -17,67 +30,81 @@ resource "helm_release" "argocd" {
         service = {
           type = var.service_type
         }
-        extraArgs = var.insecure_mode ? ["--insecure"] : []
+        extraArgs   = var.insecure_mode ? ["--insecure"] : []
+        tolerations = local.tolerations
       }
       configs = {
         params = {
           "server.insecure" = var.insecure_mode
         }
       }
-      # Tolerations for system node pool
       controller = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
-      }
-      server = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
       repoServer = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
       applicationSet = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
       notifications = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
       redis = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
       dex = {
-        tolerations = [{
-          key      = "CriticalAddonsOnly"
-          operator = "Exists"
-          effect   = "NoSchedule"
-        }]
+        tolerations = local.tolerations
       }
     })
   ]
 
   depends_on = [var.cluster_dependency]
+}
+
+# Bootstrap the root application (App of Apps pattern)
+# This tells ArgoCD to watch the Git repo and deploy all child apps
+# via sync waves. Eliminates the manual "kubectl apply root-app.yaml" step.
+resource "helm_release" "argocd_root_app" {
+  name       = "argocd-root-app"
+  repository = "https://argoproj.github.io/argo-helm"
+  chart      = "argocd-apps"
+  version    = "1.6.2"
+  namespace  = "argocd"
+  wait       = false
+
+  values = [
+    yamlencode({
+      applications = {
+        cloud-gateway-root = {
+          namespace  = "argocd"
+          finalizers = ["resources-finalizer.argocd.argoproj.io"]
+          project    = "default"
+          source = {
+            repoURL        = var.git_repo_url
+            targetRevision = "HEAD"
+            path           = "argocd/apps"
+          }
+          destination = {
+            server    = "https://kubernetes.default.svc"
+            namespace = "argocd"
+          }
+          syncPolicy = {
+            automated = {
+              prune    = true
+              selfHeal = true
+            }
+            syncOptions = [
+              "CreateNamespace=true",
+              "ApplyOutOfSyncOnly=true"
+            ]
+          }
+        }
+      }
+    })
+  ]
+
+  depends_on = [helm_release.argocd]
 }
 
 # Get ArgoCD admin password

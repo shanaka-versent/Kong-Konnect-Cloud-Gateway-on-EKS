@@ -299,6 +299,9 @@ module "cloudfront" {
 # ArgoCD manages Layers 3 & 4:
 # - Layer 3: Istio Ambient Mesh, Gateway API CRDs, Gateway, HTTPRoutes
 # - Layer 4: Backend applications (all ClusterIP, routed via Istio Gateway)
+#
+# The root application (App of Apps) is bootstrapped automatically via the
+# argocd-apps Helm chart — no manual "kubectl apply root-app.yaml" needed.
 
 module "argocd" {
   source = "./modules/argocd"
@@ -306,5 +309,6 @@ module "argocd" {
   argocd_version     = var.argocd_version
   service_type       = var.argocd_service_type
   insecure_mode      = true
+  git_repo_url       = var.argocd_git_repo_url
   cluster_dependency = module.eks.cluster_name
 }
