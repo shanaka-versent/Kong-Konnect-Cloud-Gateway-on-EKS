@@ -164,36 +164,12 @@ How it works:
 
 ---
 
-## What Each Component Handles
-
-| Responsibility | Kong Cloud Gateway (External) | Istio Gateway (In-Cluster) |
-|---------------|-------------------------------|---------------------------|
-| **Where** | Kong's AWS account, managed by Konnect | Your EKS cluster |
-| **L7 API policies** | JWT auth, rate limiting, CORS, transforms | — |
-| **Routing** | Routes to single NLB by path | HTTPRoutes to ClusterIP services |
-| **Analytics** | Full dashboard in Konnect UI | — |
-| **mTLS** | — | Automatic L4 via Ambient ztunnel |
-| **Entry point** | Public NLB (internet-facing) | Internal NLB (Transit GW only) |
-| **Configuration** | Konnect UI or decK CLI | ArgoCD (GitOps) |
-
-### Istio Ambient Mesh
-
-Sidecar-less service mesh — automatic L4 mTLS with zero application changes:
-
-| Component | What it does | Runs as |
-|-----------|-------------|---------|
-| **istiod** | Control plane, distributes config | Deployment in `istio-system` |
-| **istio-cni** | Intercepts traffic for mesh routing | DaemonSet on all nodes |
-| **ztunnel** | Encrypts pod-to-pod traffic (mTLS) | DaemonSet on all nodes |
-
-Namespaces join the mesh via label: `istio.io/dataplane-mode: ambient`
-
 ### Security Layers
 
 | Layer | Component | Protection |
 |-------|-----------|------------|
-| 1 | CloudFront + WAF | DDoS, SQLi/XSS, rate limiting, geo-blocking (optional) |
-| 2 | Origin mTLS | CloudFront bypass prevention (optional) |
+| 1 | CloudFront + WAF | DDoS, SQLi/XSS, rate limiting, geo-blocking |
+| 2 | Origin mTLS | CloudFront bypass prevention |
 | 3 | Kong Plugins | JWT auth, rate limiting, CORS, request transform |
 | 4 | Transit Gateway | Private connectivity — backends never exposed publicly |
 | 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods |
