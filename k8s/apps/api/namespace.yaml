@@ -1,9 +1,0 @@
-# API Services Namespace
-# @author Shanaka Jayasundera - shanakaj@gmail.com
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: api
-  labels:
-    app.kubernetes.io/name: api
-    purpose: api-services

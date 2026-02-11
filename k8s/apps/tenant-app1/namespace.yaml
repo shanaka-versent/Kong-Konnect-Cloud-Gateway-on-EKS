@@ -1,9 +1,0 @@
-# Tenant App1 Namespace
-# @author Shanaka Jayasundera - shanakaj@gmail.com
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: tenant-app1
-  labels:
-    app.kubernetes.io/name: tenant-app1
-    tenant: app1

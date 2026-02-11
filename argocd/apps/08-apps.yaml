@@ -1,0 +1,40 @@
+# ArgoCD App: Backend Applications
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# LAYER 4: Application Deployment (ArgoCD)
+# Sync Wave: 7 (after routes)
+#
+# Deploys all backend application services:
+# - health-responder (gateway-health namespace)
+# - sample-app-1 (sample-apps namespace)
+# - sample-app-2 (sample-apps namespace)
+# - users-api (api-services namespace) with its own HTTPRoute
+#
+# All services use ClusterIP (no per-service NLBs).
+# Traffic reaches them via Istio Gateway HTTPRoutes.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sample-apps
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "7"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
+    targetRevision: HEAD
+    path: k8s/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

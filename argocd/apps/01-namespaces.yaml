@@ -1,17 +1,19 @@
-# ArgoCD App: Users API
+# ArgoCD App: Namespaces with Istio Ambient labels
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# Deploys users-api backend service.
-# Route (/api/users) and plugins (JWT, rate-limiting, CORS) are configured
-# in Konnect. Service exposed via internal NLB for Kong Cloud Gateway access.
+# LAYER 3: EKS Customizations (ArgoCD)
+# Sync Wave: 1 (creates namespaces for other apps)
+#
+# Namespaces are labelled with istio.io/dataplane-mode: ambient
+# to enable automatic L4 mTLS via ztunnel (no sidecar injection needed)
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: users-api
+  name: namespaces
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -20,15 +22,15 @@ spec:
   source:
     repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
     targetRevision: HEAD
-    path: k8s/apps/api
+    path: k8s
+    directory:
+      include: "namespace.yaml"
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: api
+    namespace: default
 
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
-    syncOptions:
-      - CreateNamespace=true

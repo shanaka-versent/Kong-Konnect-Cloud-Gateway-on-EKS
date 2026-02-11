@@ -102,11 +102,15 @@ output "application_url" {
 output "kong_cloud_gateway_setup_command" {
   description = "Command to set up Kong Cloud Gateway with Transit Gateway"
   value       = <<-EOT
-    export KONNECT_REGION="au"
-    export KONNECT_TOKEN="kpat_xxx..."
-    export TRANSIT_GATEWAY_ID="${aws_ec2_transit_gateway.kong.id}"
-    export RAM_SHARE_ARN="${aws_ram_resource_share.kong_tgw.arn}"
-    export EKS_VPC_CIDR="${module.vpc.vpc_cidr}"
-    ./scripts/01-setup-cloud-gateway.sh
+    # 1. Ensure .env has KONNECT_REGION and KONNECT_TOKEN set
+    #    (Transit Gateway values are auto-read from Terraform outputs)
+
+    # 2. Run the setup script:
+    ./scripts/02-setup-cloud-gateway.sh
+
+    # Auto-populated from Terraform:
+    #   TRANSIT_GATEWAY_ID = ${aws_ec2_transit_gateway.kong.id}
+    #   RAM_SHARE_ARN      = ${aws_ram_resource_share.kong_tgw.arn}
+    #   EKS_VPC_CIDR       = ${module.vpc.vpc_cidr}
   EOT
 }

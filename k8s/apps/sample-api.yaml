@@ -1,16 +1,20 @@
-# Users API Deployment
+# Kong Cloud Gateway on EKS - Users API Service
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # Sample REST API service for demonstrating Kong API management.
 # Route (/api/users) and plugins (JWT, rate-limiting, CORS) are
-# configured in Konnect — see deck/kong.yaml for declarative config.
+# configured in Konnect -- see deck/kong.yaml for declarative config.
+#
+# Traffic flow:
+#   Client --> Kong Cloud GW (JWT, rate-limit, CORS) --> Transit GW -->
+#   Internal NLB --> Istio Gateway --> HTTPRoute --> users-api pod
 
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: users-api-config
-  namespace: api
+  namespace: api-services
 data:
   nginx.conf: |
     server {
@@ -56,7 +60,7 @@ data:
       ],
       "metadata": {
         "version": "v1",
-        "backend": "eks-kong-konnect-cloud-gateway",
+        "backend": "eks-kong-cloud-gw-istio",
         "timestamp": "2025-01-15T00:00:00Z"
       }
     }
@@ -66,7 +70,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: users-api
-  namespace: api
+  namespace: api-services
   labels:
     app: users-api
     version: v1
@@ -117,3 +121,59 @@ spec:
         - name: config
           configMap:
             name: users-api-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: users-api
+  namespace: api-services
+  labels:
+    app: users-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: users-api
+
+---
+# HTTPRoute for API traffic through Istio Gateway
+# Kong Cloud Gateway sends /api/users traffic to the single NLB,
+# Istio Gateway routes it to users-api pods via this HTTPRoute
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: users-api-route
+  namespace: api-services
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/users
+      backendRefs:
+        - name: users-api
+          port: 8080
+
+---
+# ReferenceGrant - allow HTTPRoute to reference services in api-services namespace
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-api-services
+  namespace: api-services
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: api-services
+  to:
+    - group: ""
+      kind: Service

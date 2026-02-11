@@ -3,8 +3,8 @@
 #
 # Kong Dedicated Cloud Gateway with EKS backend services.
 # Kong data plane runs in Kong's managed infrastructure (not in EKS).
-# Backend services in EKS are exposed via internal NLBs.
-# Kong Cloud Gateway reaches backends via AWS Transit Gateway.
+# Backend services in EKS are exposed via a single Istio Gateway (Internal NLB).
+# Kong Cloud Gateway reaches the Istio Gateway NLB via AWS Transit Gateway.
 #
 # Architecture Layers:
 # ===================
@@ -14,31 +14,37 @@
 # Layer 2: Base EKS Cluster Setup (Terraform)
 #   - EKS Cluster, Node Groups, OIDC Provider
 #   - IAM Roles (LB Controller IRSA)
-#   - AWS Load Balancer Controller (creates internal NLBs for backend services)
-#   - AWS Transit Gateway (for Kong Cloud Gateway ↔ EKS connectivity)
+#   - AWS Load Balancer Controller (creates internal NLB for Istio Gateway)
+#   - AWS Transit Gateway (for Kong Cloud Gateway <-> EKS connectivity)
 #   - ArgoCD Installation
 #
-# Layer 3: Backend Applications (ArgoCD)
+# Layer 3: EKS Customizations (ArgoCD)
+#   - Gateway API CRDs
+#   - Istio Ambient Mesh (base, istiod, cni, ztunnel)
+#   - Namespaces with ambient labels (automatic L4 mTLS)
+#   - Istio Gateway (single internal NLB) and HTTPRoutes
+#
+# Layer 4: Backend Applications (ArgoCD)
 #   - Sample Applications (app1, app2)
 #   - Users API
 #   - Health Responder
-#   - Each exposed via internal NLB
+#   - All use ClusterIP services (routed via Istio Gateway HTTPRoutes)
 #
-# Layer 4: API Configuration (Konnect)
+# Layer 5: API Configuration (Konnect)
 #   - Kong Cloud Gateway provisioned in Konnect (Kong's infrastructure)
 #   - Routes, plugins, consumers via decK / Konnect UI
-#   - Service upstreams point to internal NLB DNS names
+#   - All service upstreams point to the single Istio Gateway NLB DNS
 #
-# Layer 5: Edge Security (Terraform — optional)
+# Layer 6: Edge Security (Terraform -- optional)
 #   - CloudFront distribution with WAF (DDoS, SQLi, XSS, rate limiting)
 #   - Custom origin header for CloudFront bypass prevention
 #   - Security response headers (HSTS, X-Frame-Options, etc.)
 #
 # Traffic Flow (with CloudFront):
-# Client --> CloudFront (WAF) --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLBs --> EKS
+# Client --> CloudFront (WAF) --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLB --> Istio Gateway --> Pods
 #
 # Traffic Flow (without CloudFront):
-# Client --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLBs --> EKS Pods
+# Client --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLB --> Istio Gateway --> Pods
 
 locals {
   name_prefix  = "${var.project_name}-${var.environment}"
@@ -65,7 +71,7 @@ module "vpc" {
 # LAYER 2: BASE EKS CLUSTER SETUP
 # ==============================================================================
 
-# EKS Module - Kubernetes cluster (hosts backend services only)
+# EKS Module - Kubernetes cluster (hosts Istio Gateway + backend services)
 module "eks" {
   source = "./modules/eks"
 
@@ -109,10 +115,11 @@ module "iam" {
   tags              = var.tags
 }
 
-# AWS Load Balancer Controller - Creates internal NLBs for backend services
-# Backend services use type: LoadBalancer with internal NLB annotations.
-# The LB Controller reconciles these into AWS internal NLBs that Kong Cloud
-# Gateway can reach via Transit Gateway.
+# AWS Load Balancer Controller - Creates the internal NLB for Istio Gateway
+# The Istio Gateway resource (deployed by ArgoCD) creates a Service type: LoadBalancer
+# with internal NLB annotations. The LB Controller reconciles this into an AWS
+# internal NLB that Kong Cloud Gateway can reach via Transit Gateway.
+# This replaces per-service NLBs with a single NLB entry point.
 module "lb_controller" {
   source = "./modules/lb-controller"
 
@@ -123,22 +130,24 @@ module "lb_controller" {
   cluster_dependency = module.eks.cluster_name
 }
 
-# Wait for LB Controller to be ready
+# Wait for LB Controller to be ready before ArgoCD deploys Istio Gateway
 resource "time_sleep" "wait_for_lb_controller" {
   depends_on      = [module.lb_controller]
   create_duration = "30s"
 }
 
 # ==============================================================================
-# TRANSIT GATEWAY — Kong Cloud Gateway ↔ EKS Private Connectivity
+# TRANSIT GATEWAY -- Kong Cloud Gateway <-> EKS Private Connectivity
 # ==============================================================================
 # Creates an AWS Transit Gateway and shares it via RAM so Kong's Cloud Gateway
 # can establish private network connectivity to the EKS VPC.
+# Kong Cloud Gateway sends all traffic to the single Istio Gateway NLB
+# through this Transit Gateway.
 #
 # After terraform apply:
-# 1. Run scripts/01-setup-cloud-gateway.sh to create Cloud GW and attach TGW
-# 2. Accept the TGW attachment in AWS Console (VPC → Transit Gateway Attachments)
-# 3. Update VPC route tables to route Kong's CIDR (192.168.0.0/16) via TGW
+# 1. Run scripts/02-setup-cloud-gateway.sh to create Cloud GW and attach TGW
+# 2. Accept the TGW attachment in AWS Console (VPC -> Transit Gateway Attachments)
+# 3. VPC route tables are auto-configured to route Kong's CIDR via TGW
 
 resource "aws_ec2_transit_gateway" "kong" {
   description = "Transit Gateway for Kong Cloud Gateway connectivity"
@@ -215,7 +224,7 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 }
 
 # ==============================================================================
-# LAYER 5: EDGE SECURITY — CloudFront + WAF (Optional)
+# LAYER 6: EDGE SECURITY -- CloudFront + WAF (Optional)
 # ==============================================================================
 # Places CloudFront + WAF in front of Kong's Cloud Gateway proxy URL.
 #
@@ -229,7 +238,7 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 #
 # 1. Origin mTLS (recommended, strongest):
 #    CloudFront presents a client certificate during TLS handshake with Kong.
-#    Kong validates the cert → rejects non-CloudFront connections.
+#    Kong validates the cert -> rejects non-CloudFront connections.
 #    Requires: ACM certificate in us-east-1 with clientAuth EKU.
 #
 # 2. Custom origin header (application-layer):
@@ -237,7 +246,7 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 #    Simpler but weaker (shared secret).
 #
 # After terraform apply (if using custom header):
-# 1. Edit deck/kong.yaml — uncomment the pre-function plugin
+# 1. Edit deck/kong.yaml -- uncomment the pre-function plugin
 # 2. Set the secret value matching cf_origin_header_value
 # 3. Sync: deck gateway sync -s deck/kong.yaml ...
 
@@ -255,10 +264,10 @@ module "cloudfront" {
   # Kong Cloud Gateway proxy URL (set after Cloud GW is provisioned)
   kong_cloud_gateway_domain = var.kong_cloud_gateway_domain
 
-  # CloudFront bypass prevention — Layer 1: Origin mTLS
+  # CloudFront bypass prevention -- Layer 1: Origin mTLS
   origin_mtls_certificate_arn = var.origin_mtls_certificate_arn
 
-  # CloudFront bypass prevention — Layer 2: Custom origin header
+  # CloudFront bypass prevention -- Layer 2: Custom origin header
   cf_origin_header_name  = var.cf_origin_header_name
   cf_origin_header_value = var.cf_origin_header_value
 
@@ -279,16 +288,18 @@ module "cloudfront" {
 
 # ==============================================================================
 # PRE-DESTROY CLEANUP
-# Use ./scripts/destroy.sh for clean teardown. It deletes ArgoCD apps,
-# removes internal NLBs, and runs terraform destroy.
+# Use ./scripts/destroy.sh for clean teardown. It deletes ArgoCD apps
+# (which removes Istio Gateway and its NLB), then runs terraform destroy.
 # Kong Cloud Gateway must be deleted separately in Konnect.
 # ==============================================================================
 
 # ==============================================================================
 # ARGOCD - GITOPS CONTINUOUS DELIVERY
 # ==============================================================================
+# ArgoCD manages Layers 3 & 4:
+# - Layer 3: Istio Ambient Mesh, Gateway API CRDs, Gateway, HTTPRoutes
+# - Layer 4: Backend applications (all ClusterIP, routed via Istio Gateway)
 
-# ArgoCD - GitOps continuous delivery
 module "argocd" {
   source = "./modules/argocd"
 
