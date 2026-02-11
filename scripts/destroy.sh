@@ -1,5 +1,5 @@
 #!/bin/bash
-# EKS Kong Konnect Cloud Gateway - Automated Stack Teardown
+# Kong Cloud Gateway on EKS - Automated Stack Teardown
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # Tears down the EKS infrastructure. The Kong Cloud Gateway (in Kong's infra)
@@ -7,10 +7,11 @@
 #
 # DESTRUCTION ORDER:
 # ==================
-# 1. Delete ArgoCD applications (cascade deletes K8s resources)
-# 2. Wait for LoadBalancer services (internal NLBs) to be removed
-# 3. Run terraform destroy (handles EKS, VPC, Transit Gateway)
-# 4. Remind to delete Cloud Gateway in Konnect
+# 1. Delete ArgoCD applications (cascade deletes Istio, Gateway, apps)
+# 2. Wait for Istio Gateway NLB to be deprovisioned
+# 3. Cleanup remaining K8s namespaces
+# 4. Run terraform destroy (handles EKS, VPC, Transit Gateway)
+# 5. Remind to delete Cloud Gateway in Konnect
 
 set -euo pipefail
 
@@ -57,11 +58,11 @@ delete_argocd_apps() {
 
     if kubectl get app cloud-gateway-root -n argocd &>/dev/null; then
         kubectl delete app cloud-gateway-root -n argocd --timeout=300s 2>/dev/null || true
-        log "Waiting for ArgoCD cascade deletion..."
+        log "Waiting for ArgoCD cascade deletion (Istio, Gateway, apps)..."
         kubectl wait --for=delete app/cloud-gateway-root -n argocd --timeout=300s 2>/dev/null || true
     fi
 
-    # Safety net
+    # Safety net - delete any remaining apps
     local remaining_apps
     remaining_apps=$(kubectl get app -n argocd -o name 2>/dev/null || true)
     if [[ -n "$remaining_apps" ]]; then
@@ -75,7 +76,7 @@ delete_argocd_apps() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 2: Wait for internal NLBs to deprovision
+# Step 2: Wait for Istio Gateway NLB to deprovision
 # ---------------------------------------------------------------------------
 delete_loadbalancer_services() {
     log "Step 2: Checking for remaining LoadBalancer services..."
@@ -85,7 +86,7 @@ delete_loadbalancer_services() {
         jq -r '.items[] | select(.spec.type == "LoadBalancer") | "\(.metadata.namespace)/\(.metadata.name)"' || true)
 
     if [[ -n "$lb_services" ]]; then
-        warn "Found LoadBalancer services (internal NLBs):"
+        warn "Found LoadBalancer services (Istio Gateway NLB):"
         echo "$lb_services" | while read -r svc; do echo "  - $svc"; done
 
         echo "$lb_services" | while read -r svc; do
@@ -94,7 +95,7 @@ delete_loadbalancer_services() {
             kubectl delete svc "$name" -n "$ns" --timeout=120s 2>/dev/null || true
         done
 
-        log "Waiting 90s for internal NLBs to deprovision..."
+        log "Waiting 90s for Istio Gateway NLB to deprovision..."
         sleep 90
     else
         log "No LoadBalancer services found."
@@ -107,7 +108,7 @@ delete_loadbalancer_services() {
 cleanup_k8s_resources() {
     log "Step 3: Cleaning up K8s resources..."
 
-    for ns in api tenant-app1 tenant-app2 gateway-health; do
+    for ns in istio-ingress istio-system gateway-health sample-apps api-services; do
         if kubectl get ns "$ns" &>/dev/null; then
             kubectl delete ns "$ns" --timeout=120s 2>/dev/null || true
         fi
@@ -146,7 +147,7 @@ remind_konnect_cleanup() {
     echo "Delete it separately via:"
     echo ""
     echo "  Option A: Konnect UI"
-    echo "    https://cloud.konghq.com → Gateway Manager → Delete"
+    echo "    https://cloud.konghq.com -> Gateway Manager -> Delete"
     echo ""
     echo "  Option B: Konnect API"
     echo "    curl -X DELETE \"https://\${KONNECT_REGION}.api.konghq.com/v2/control-planes/\${CP_ID}\" \\"
@@ -164,6 +165,7 @@ main() {
     echo ""
     echo "================================================="
     echo "  Kong Cloud Gateway EKS - Stack Teardown"
+    echo "  (Istio Gateway + Kong Cloud Gateway)"
     echo "================================================="
     echo ""
 

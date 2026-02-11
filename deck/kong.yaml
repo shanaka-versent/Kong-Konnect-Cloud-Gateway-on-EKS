@@ -1,11 +1,17 @@
-# Kong Konnect Cloud Gateway — Declarative Configuration (decK)
+# Kong Konnect Cloud Gateway -- Declarative Configuration (decK)
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # This file defines routes, services, plugins, and consumers for the
 # Kong Dedicated Cloud Gateway managed by Konnect.
 #
-# IMPORTANT: Update service URLs with your internal NLB endpoints.
-# Run ./scripts/03-post-terraform-setup.sh to get the NLB DNS names.
+# IMPORTANT: All services point to the SINGLE Istio Gateway internal NLB.
+# Run ./scripts/03-post-terraform-setup.sh to get the NLB DNS name.
+# Replace <istio-gateway-nlb-dns> with the actual NLB hostname.
+#
+# Architecture:
+#   Kong Cloud GW --[Transit GW]--> Internal NLB --> Istio Gateway --> HTTPRoute --> Pod
+#   All services share the same upstream NLB. Path-based routing is handled
+#   by both Kong (L7 plugins) and Istio Gateway (HTTPRoutes) in the cluster.
 #
 # Apply with:
 #   deck gateway sync -s deck/kong.yaml \
@@ -21,7 +27,7 @@ _format_version: "3.0"
 
 plugins:
   # --------------------------------------------------------------------------
-  # CloudFront Bypass Prevention — Custom Origin Header (Optional)
+  # CloudFront Bypass Prevention -- Custom Origin Header (Optional)
   # --------------------------------------------------------------------------
   # NOTE: If you're using origin mTLS (recommended), this plugin is OPTIONAL.
   # mTLS alone prevents bypass at the TLS layer (Kong rejects connections
@@ -30,8 +36,6 @@ plugins:
   #
   # The pre-function plugin verifies the custom origin header injected by
   # CloudFront. Requests without the correct header are rejected with 403.
-  # The overhead is negligible — a single header check per request in Lua
-  # with no external I/O, no state, and no rate limit concerns.
   #
   # To enable:
   # 1. Uncomment the plugin below
@@ -51,16 +55,20 @@ plugins:
 # ==============================================================================
 # SERVICES & ROUTES
 # ==============================================================================
-# Service URLs point to internal NLBs (accessible via Transit Gateway).
-# Replace <xxx-nlb-dns> with actual internal NLB DNS names from:
-#   kubectl get svc -A -o wide | grep LoadBalancer
+# All services point to the SINGLE Istio Gateway internal NLB.
+# Kong sends traffic to this NLB with the original path preserved.
+# Istio Gateway uses HTTPRoutes to route to the correct backend pod.
+#
+# Replace <istio-gateway-nlb-dns> with the Istio Gateway NLB hostname from:
+#   kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
+#     -o jsonpath='{.status.addresses[0].value}'
 
 services:
   # --------------------------------------------------------------------------
-  # Users API — JWT-protected REST API
+  # Users API -- JWT-protected REST API
   # --------------------------------------------------------------------------
   - name: users-api
-    url: http://<users-api-nlb-dns>:80
+    url: http://<istio-gateway-nlb-dns>:80
     protocol: http
     port: 80
     routes:
@@ -105,7 +113,7 @@ services:
   # Tenant App 1
   # --------------------------------------------------------------------------
   - name: tenant-app1
-    url: http://<app1-nlb-dns>:80
+    url: http://<istio-gateway-nlb-dns>:80
     protocol: http
     port: 80
     routes:
@@ -121,7 +129,7 @@ services:
   # Tenant App 2
   # --------------------------------------------------------------------------
   - name: tenant-app2
-    url: http://<app2-nlb-dns>:80
+    url: http://<istio-gateway-nlb-dns>:80
     protocol: http
     port: 80
     routes:
@@ -137,7 +145,7 @@ services:
   # Health Check
   # --------------------------------------------------------------------------
   - name: gateway-health
-    url: http://<health-nlb-dns>:80
+    url: http://<istio-gateway-nlb-dns>:80
     protocol: http
     port: 80
     routes:

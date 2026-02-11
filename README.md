@@ -1,270 +1,214 @@
-# AWS EKS with Kong Dedicated Cloud Gateway — Fully Managed API Management
+# Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)
 
-This POC demonstrates how to use **Kong Konnect Dedicated Cloud Gateways** with backend services running on **AWS EKS**, fronted by **CloudFront + WAF** for edge security. Kong's data plane runs in Kong's fully managed infrastructure — you only manage the EKS cluster hosting your backend services.
+This POC demonstrates **Kong Konnect Dedicated Cloud Gateways** with backend services on **AWS EKS**, using **Istio Gateway API (Ambient mode)** as the in-cluster ingress layer and optional **CloudFront + WAF** for edge security.
 
-## Background
+Kong's data plane runs in Kong's fully managed infrastructure. Backend services in EKS are exposed through a **single Istio Gateway internal NLB**, replacing per-service NLBs. Istio Ambient mesh provides automatic **L4 mTLS** between all pods without sidecar injection.
 
-My previous POCs implemented API gateways using [Istio on EKS](https://github.com/shanaka-versent/EKS-Istio-GatewayAPI-Deom/tree/k8s-gateway-api-poc), [Kong with K8s Gateway API](https://github.com/shanaka-versent/EKS-Kong-GatewayAPI-Demo), and [Kong with Konnect as source](https://github.com/shanaka-versent/Kong-Konnect-Gateway-on-EKS). All of those required running Kong or Istio data plane pods inside the EKS cluster.
-
-This repo takes the **fully managed approach** — Kong's Dedicated Cloud Gateway handles all API gateway infrastructure. You deploy backend services in EKS, expose them via internal NLBs (created by the AWS Load Balancer Controller), and connect Kong to them through an AWS Transit Gateway. CloudFront + WAF sits at the edge for DDoS protection, SQLi/XSS filtering, and rate limiting.
-
-> **Note:** There are no Kubernetes `Ingress` resources, Gateway API CRDs, or service mesh in this pattern. All L7 API gateway logic (routing, authentication, rate limiting) is handled by Kong Cloud Gateway outside the cluster. The **AWS Load Balancer Controller** is installed in the cluster and operates in its **L4 service controller mode** — it watches for `Service type: LoadBalancer` resources and provisions internal NLBs via the AWS API. It is not used in its L7 ingress mode (no `Ingress` or `IngressClass` resources exist). No traffic flows through the controller itself; it's purely control plane automation that keeps NLB target groups in sync with pod IPs.
-
-## Architecture
-
-### High-Level Traffic Flow
-
-```mermaid
-graph LR
-    Client[Client] --> CF[CloudFront<br/>+ WAF]
-    CF -->|mTLS + Origin Header| KDP[Kong Cloud GW<br/>Kong's Infrastructure]
-    KDP -->|Config + Telemetry| KCP[Kong Konnect<br/>Control Plane]
-    KDP -->|Transit Gateway| NLB_E[Internal NLBs<br/>Your VPC]
-    NLB_E --> App1[App 1]
-    NLB_E --> App2[App 2]
-    NLB_E --> API[Users API]
-    NLB_E --> Health[Health Check]
-
-    style CF fill:#ff9900,color:#000
-```
-
-### Detailed Architecture
+## Architecture Overview
 
 ```mermaid
 graph TB
-    subgraph "AWS Edge"
-        CF[CloudFront Distribution]
-        WAF[AWS WAF<br/>SQLi + XSS + Rate Limit]
-        CF --> WAF
-    end
+    Client([Client])
+    CF[CloudFront + WAF<br/>Edge Security]
+    Kong[Kong Cloud Gateway<br/>Kong's Managed Infra<br/>JWT, Rate Limit, CORS]
+    TGW[AWS Transit Gateway<br/>Private Connectivity]
+    NLB[Internal NLB<br/>Single Entry Point]
+    IGW[Istio Gateway<br/>K8s Gateway API]
+    HR[HTTPRoutes<br/>Path-based Routing]
 
-    subgraph "Kong's Managed Infrastructure"
-        subgraph "Kong DCGW VPC (192.168.0.0/16)"
-            K_NLB[Regional NLB<br/>Static IPs]
-            KDP1[Kong DP Pod 1]
-            KDP2[Kong DP Pod 2]
-            KDP3[Kong DP Pod N<br/>Auto-scaled]
-            K_NLB --> KDP1 & KDP2 & KDP3
+    subgraph EKS Cluster
+        subgraph istio-system
+            Istiod[istiod<br/>Control Plane]
+            CNI[istio-cni<br/>DaemonSet]
+            ZT[ztunnel<br/>L4 mTLS]
         end
-        KCP[Konnect Control Plane<br/>SaaS]
-        Analytics[Analytics Dashboard]
-        Portal[Dev Portal]
-        KCP --> Analytics & Portal
-    end
-
-    subgraph "Your AWS Account"
-        TGW[AWS Transit Gateway]
-        subgraph "Your VPC (10.0.0.0/16)"
-            subgraph "EKS Cluster"
-                LBC[AWS LB Controller<br/>provisions NLBs]
-                NLB1[Internal NLB<br/>users-api]
-                NLB2[Internal NLB<br/>app1]
-                NLB3[Internal NLB<br/>app2]
-                NLB4[Internal NLB<br/>health]
-                ArgoCD[ArgoCD]
-                LBC -.->|creates & manages| NLB1 & NLB2 & NLB3 & NLB4
-            end
+        subgraph istio-ingress
+            IGW
         end
-        RAM[AWS RAM<br/>TGW Share]
+        subgraph Application Namespaces
+            HR
+            App1[sample-app-1<br/>ClusterIP]
+            App2[sample-app-2<br/>ClusterIP]
+            API[users-api<br/>ClusterIP]
+            Health[health-responder<br/>ClusterIP]
+        end
     end
 
-    WAF -->|mTLS + X-CF-Secret| K_NLB
-    KDP1 & KDP2 & KDP3 -->|mTLS config| KCP
-    KDP1 & KDP2 & KDP3 -->|Transit Gateway| TGW
-    TGW --> NLB1 & NLB2 & NLB3 & NLB4
-    RAM -.->|Share TGW with<br/>Kong's AWS Account| TGW
+    Client -->|HTTPS| CF
+    CF -->|HTTPS| Kong
+    Client -.->|Direct| Kong
+    Kong -->|Private| TGW
+    TGW --> NLB
+    NLB --> IGW
+    IGW --> HR
+    HR -->|/app1| App1
+    HR -->|/app2| App2
+    HR -->|/api/users| API
+    HR -->|/healthz| Health
+    Istiod -.->|Config| ZT
+    ZT -.->|mTLS| App1
+    ZT -.->|mTLS| App2
+    ZT -.->|mTLS| API
 
-    style CF fill:#ff9900,color:#000
-    style WAF fill:#ff9900,color:#000
-    style K_NLB fill:#003459,color:#fff
-    style KDP1 fill:#003459,color:#fff
-    style KDP2 fill:#003459,color:#fff
-    style KDP3 fill:#003459,color:#fff
-    style TGW fill:#ff9900,color:#000
-    style LBC fill:#ff9900,color:#000
+    style Kong fill:#003459,color:#fff
+    style IGW fill:#466BB0,color:#fff
+    style Istiod fill:#466BB0,color:#fff
+    style CF fill:#F68D2E,color:#fff
+    style TGW fill:#232F3E,color:#fff
+    style NLB fill:#232F3E,color:#fff
 ```
 
-### Network Connectivity
+## Traffic Flow
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant C as Client
     participant CF as CloudFront + WAF
-    participant KongNLB as Kong NLB (Kong's VPC)
-    participant KongDP as Kong Data Plane
+    participant K as Kong Cloud Gateway
     participant TGW as Transit Gateway
-    participant IntNLB as Internal NLB (Your VPC)
-    participant EKS as EKS Backend Pod
+    participant NLB as Internal NLB
+    participant IG as Istio Gateway
+    participant HR as HTTPRoute
+    participant P as Backend Pod
 
-    Client->>CF: Request (e.g., /api/users)
-    Note over CF: WAF: SQLi/XSS/Rate check
-    CF->>KongNLB: Forward (mTLS + X-CF-Secret)
-    KongNLB->>KongDP: Forward to DP pod
-    Note over KongDP: Verify mTLS cert + X-CF-Secret<br/>Apply plugins (JWT, CORS)
-    KongDP->>TGW: Route to EKS VPC CIDR
-    TGW->>IntNLB: Forward to internal NLB
-    IntNLB->>EKS: Forward to pod
-    EKS-->>KongDP: Response (via TGW)
-    KongDP-->>CF: Response
-    CF-->>Client: Response + Security Headers
+    C->>CF: HTTPS Request
+    CF->>K: HTTPS (mTLS bypass prevention)
+    Note over K: JWT Auth, Rate Limiting,<br/>CORS, Request Transform
+    K->>TGW: HTTP to NLB DNS
+    TGW->>NLB: Private routing
+    NLB->>IG: Forward to Istio Gateway
+    IG->>HR: Match path (/app1, /api/users, etc.)
+    HR->>P: Route to ClusterIP Service
+    Note over P: Pod-to-pod mTLS via<br/>Istio Ambient ztunnel
+    P-->>C: Response
 ```
 
-### CloudFront Bypass Prevention
-
-Kong Cloud Gateway has a public NLB. Without protection, attackers could bypass CloudFront/WAF by hitting Kong's proxy URL directly. This repo implements **two layers** of bypass prevention — either or both can be enabled:
+## Architecture Layers
 
 ```mermaid
 graph LR
-    subgraph "Allowed (mTLS + Header)"
-        A1[Client] --> A2[CloudFront<br/>client cert + X-CF-Secret] --> A3[Kong Cloud GW<br/>cert valid ✅ header valid ✅]
+    subgraph "Layer 1: Cloud Foundations (Terraform)"
+        VPC[VPC + Subnets]
+        NAT[NAT Gateway]
+        IGW2[Internet Gateway]
     end
 
-    subgraph "Blocked"
-        B1[Attacker] -->|Direct access| B3[Kong Cloud GW<br/>no cert → TLS rejected ❌]
+    subgraph "Layer 2: Base EKS Setup (Terraform)"
+        EKS[EKS Cluster]
+        Nodes[Node Groups]
+        LBC[LB Controller]
+        TGW2[Transit Gateway]
+        ArgoCD2[ArgoCD]
     end
 
-    style A3 fill:#2d8659,color:#fff
-    style B3 fill:#cc3333,color:#fff
+    subgraph "Layer 3: EKS Customizations (ArgoCD)"
+        CRDs[Gateway API CRDs]
+        Istio[Istio Ambient<br/>base + istiod + cni + ztunnel]
+        GW[Istio Gateway<br/>Single Internal NLB]
+        Routes[HTTPRoutes]
+    end
+
+    subgraph "Layer 4: Applications (ArgoCD)"
+        Apps[Backend Services<br/>All ClusterIP]
+    end
+
+    subgraph "Layer 5: API Config (Konnect)"
+        KongGW[Kong Cloud Gateway<br/>Routes, Plugins, Consumers]
+    end
+
+    subgraph "Layer 6: Edge Security (Terraform)"
+        CFront[CloudFront + WAF<br/>Optional]
+    end
+
+    VPC --> EKS
+    EKS --> CRDs
+    CRDs --> Istio
+    Istio --> GW
+    GW --> Routes
+    Routes --> Apps
+    Apps -.-> KongGW
+    KongGW -.-> CFront
 ```
 
-| Technique | How It Works | Status |
-|-----------|-------------|--------|
-| **Origin mTLS** (recommended) | CloudFront presents client certificate during TLS handshake; Kong rejects connections without valid cert. Cryptographic proof of identity. | ✅ Implemented |
-| **Custom origin header** | CloudFront injects `X-CF-Secret`; Kong `pre-function` plugin validates it and returns 403 if missing. Application-layer shared secret. | ✅ Implemented |
-| **IP allowlisting** | Kong Cloud Gateway provides static egress NAT IPs for allowlisting | ℹ️ Optional (contact Kong) |
+## Key Design Decisions
 
-> **Recommendation:** Use **origin mTLS** — it's the strongest option (cryptographic, not a shared secret). The custom header is optional defense-in-depth. mTLS alone is sufficient for bypass prevention.
+| Aspect | Previous (Per-Service NLBs) | Current (Istio Gateway) |
+|--------|---------------------------|------------------------|
+| **Entry to EKS** | Multiple internal NLBs (1 per service) | Single internal NLB via Istio Gateway |
+| **Service type** | `LoadBalancer` per service | `ClusterIP` per service |
+| **L7 routing in cluster** | None (Kong did all routing) | Istio Gateway HTTPRoutes |
+| **In-cluster mTLS** | None | Automatic via Istio Ambient ztunnel |
+| **Kong upstream config** | Different NLB DNS per service | Single NLB DNS for all services |
+| **Cost** | ~$16/mo per NLB x N services | Single NLB + Istio control plane |
+| **Kong Cloud Gateway** | External (unchanged) | External (unchanged) |
+| **Sidecar injection** | N/A | None needed (Ambient mode) |
 
-#### Origin mTLS Setup
+## What Kong Cloud Gateway Still Handles
 
-1. Create a private CA (AWS Private CA or third-party)
-2. Issue a client certificate with **Extended Key Usage = clientAuth**
-3. Import the certificate into ACM in **us-east-1**
-4. Pass the certificate ARN to Terraform:
-   ```bash
-   terraform apply -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123"
-   ```
-5. Configure Kong Cloud Gateway to require client certificates (contact Kong support or configure via Konnect)
+Kong Cloud Gateway remains **external** and fully managed by Konnect. It continues to handle:
 
-### What's Different from Self-Hosted Kong
+- **L7 API Management**: JWT authentication, rate limiting, CORS, request transformation
+- **Route-level plugins**: Per-service policies applied at the gateway
+- **Consumer management**: API keys, JWT credentials
+- **CloudFront bypass prevention**: mTLS + custom header validation
+- **Public endpoint**: Kong's NLB serves as the internet-facing entry point
 
-```mermaid
-graph TB
-    subgraph "Self-Hosted (Kong-Konnect-Gateway-on-EKS)"
-        direction LR
-        CF1[CloudFront] --> NLB1_S[NLB] --> Kong1[Kong DP<br/>IN your EKS] --> Apps1[Backend Apps<br/>IN your EKS]
-    end
-
-    subgraph "Cloud Gateway (This Repo)"
-        direction LR
-        CF2[CloudFront] --> Kong2[Kong Cloud GW<br/>Kong's Infra] -->|Transit GW| Apps2[Backend Apps<br/>IN your EKS]
-    end
-
-    style Kong1 fill:#003459,color:#fff
-    style Kong2 fill:#003459,color:#fff
-    style CF1 fill:#ff9900,color:#000
-    style CF2 fill:#ff9900,color:#000
-```
-
-| Aspect | Self-Hosted (Previous Repo) | Cloud Gateway (This Repo) |
-|--------|----------------------------|---------------------------|
-| Kong DP runs in | Your EKS cluster | Kong's managed infrastructure |
-| You manage | Everything (infra + Kong + apps) | Only backend apps in EKS |
-| K8s ingress/gateway | None (Kong DP pods in cluster) | AWS LB Controller (L4 only — no `Ingress` or Gateway API resources) |
-| Service exposure | ClusterIP (Kong DP in same cluster) | `Service type: LoadBalancer` → internal NLBs via AWS LB Controller |
-| Scaling | Manual (HPA, node scaling) | Autopilot (auto-scales on RPS) |
-| Upgrades | Manual (Helm rolling updates) | Automatic with traffic shifting |
-| Network path | CloudFront → VPC Origin → NLB → Kong (private) | CloudFront → Kong NLB (public) → Transit GW → internal NLBs |
-| CF bypass prevention | Not needed (VPC Origin = private) | Origin mTLS (recommended) + custom header (optional) |
-| WAF | AWS WAF on CloudFront | AWS WAF on CloudFront |
-| SLA | Your responsibility | 99.99% from Kong |
+The Istio Gateway inside EKS only handles **internal path-based routing** to ClusterIP services.
 
 ## Prerequisites
 
-- **AWS CLI** configured with appropriate credentials
-- **Terraform** >= 1.5
-- **kubectl** configured for EKS cluster access
-- **Helm** >= 3.x
-- **Kong Konnect account** with Cloud Gateway entitlement — [cloud.konghq.com](https://cloud.konghq.com)
-- **Konnect Personal Access Token** — [Generate one](https://cloud.konghq.com/global/account/tokens)
-- **decK** (optional) — [Install decK](https://docs.konghq.com/deck/latest/installation/)
+- AWS CLI configured with appropriate credentials
+- Terraform >= 1.5
+- kubectl
+- Helm 3
+- [decK CLI](https://docs.konghq.com/deck/latest/) for Kong configuration
+- A [Kong Konnect](https://konghq.com/products/kong-konnect) account with Dedicated Cloud Gateway entitlement
 
-### AWS Configuration
-
-```bash
-export AWS_PROFILE=stax-stax-au1-versent-innovation
-export AWS_REGION=ap-southeast-2
-```
-
-## Deployment Steps
+## Deployment
 
 ### Step 1: Deploy Infrastructure (Terraform)
 
 ```bash
 cd terraform
 terraform init
-terraform plan
 terraform apply
 ```
 
-This creates:
-- VPC with public/private subnets across 2 AZs
-- EKS cluster with managed node groups
-- AWS Load Balancer Controller — operates in L4 mode, watches `Service type: LoadBalancer` and provisions internal NLBs (no L7 `Ingress` resources used)
-- **AWS Transit Gateway** + RAM share (for Kong Cloud Gateway connectivity)
-- ArgoCD installation
+This creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, ArgoCD.
 
-To enable CloudFront + WAF with **origin mTLS** (recommended):
+### Step 2: Configure kubectl
 
 ```bash
-terraform apply \
-  -var="enable_cloudfront=true" \
-  -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
-  -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123"
+aws eks update-kubeconfig --name $(terraform -chdir=terraform output -raw cluster_name) --region ap-southeast-2
 ```
 
-Or with **custom origin header** (simpler, application-layer):
-
-```bash
-terraform apply \
-  -var="enable_cloudfront=true" \
-  -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
-  -var="cf_origin_header_value=$(openssl rand -hex 32)"
-```
-
-Or **both** (defense-in-depth):
-
-```bash
-terraform apply \
-  -var="enable_cloudfront=true" \
-  -var="kong_cloud_gateway_domain=<your-proxy-url>.au.kong-cloud.com" \
-  -var="origin_mtls_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/abc-123" \
-  -var="cf_origin_header_value=$(openssl rand -hex 32)"
-```
-
-### Step 2: Deploy Backend Services (ArgoCD)
+### Step 3: Deploy ArgoCD Root App
 
 ```bash
 kubectl apply -f argocd/apps/root-app.yaml
-kubectl get applications -n argocd -w
 ```
 
-ArgoCD deploys backend services, each with a `Service type: LoadBalancer` (internal NLB annotation). The AWS Load Balancer Controller automatically provisions an internal NLB per service and registers pod IPs as targets:
-- `users-api` → Internal NLB
-- `sample-app-1` → Internal NLB
-- `sample-app-2` → Internal NLB
-- `health-responder` → Internal NLB
+ArgoCD will automatically deploy in order (via sync waves):
+1. **Wave -2**: Gateway API CRDs
+2. **Wave -1**: Istio Base CRDs
+3. **Wave 0**: istiod + istio-cni + ztunnel (Ambient mesh)
+4. **Wave 1**: Namespaces with ambient labels
+5. **Wave 5**: Istio Gateway (creates single internal NLB)
+6. **Wave 6**: HTTPRoutes (path-based routing)
+7. **Wave 7**: Backend applications (all ClusterIP)
 
-Once all applications are synced, get the internal NLB DNS names — you'll need them for Konnect service configuration:
+### Step 4: (Optional) Generate TLS Certificates
 
 ```bash
-./scripts/03-post-terraform-setup.sh
-
-# Or manually:
-kubectl get svc -A -o wide | grep LoadBalancer
+./scripts/01-generate-certs.sh
+kubectl create namespace istio-ingress
+kubectl create secret tls istio-gateway-tls \
+  --cert=certs/server.crt \
+  --key=certs/server.key \
+  -n istio-ingress
 ```
 
-### Step 3: Set Up Kong Cloud Gateway (Konnect)
+### Step 5: Set Up Kong Cloud Gateway
 
 ```bash
 export KONNECT_REGION="au"
@@ -272,36 +216,24 @@ export KONNECT_TOKEN="kpat_xxx..."
 export TRANSIT_GATEWAY_ID=$(terraform -chdir=terraform output -raw transit_gateway_id)
 export RAM_SHARE_ARN=$(terraform -chdir=terraform output -raw ram_share_arn)
 export EKS_VPC_CIDR=$(terraform -chdir=terraform output -raw vpc_cidr)
-
-./scripts/01-setup-cloud-gateway.sh
+./scripts/02-setup-cloud-gateway.sh
 ```
 
-This script:
-1. Creates a Konnect control plane
-2. Provisions a Cloud Gateway network in `ap-southeast-2` (~30 min)
-3. Creates a data plane group (Autopilot mode)
-4. Attaches the Transit Gateway
+### Step 6: Get Istio Gateway NLB Endpoint
 
-**Alternative:** Use the Konnect UI (Gateway Manager → Create → Dedicated Cloud Gateway) or the [Konnect Terraform provider](https://registry.terraform.io/providers/Kong/konnect/latest).
+```bash
+./scripts/03-post-terraform-setup.sh
+```
 
-### Step 4: Accept Transit Gateway Attachment
-
-After the Cloud Gateway network is provisioned:
-
-1. Go to **AWS Console → VPC → Transit Gateway Attachments**
-2. Find the pending attachment from Kong's account
-3. **Accept** the attachment
-4. Verify routes in the Transit Gateway route table
-
-### Step 5: Configure Routes in Konnect
-
-Update `deck/kong.yaml` with the actual internal NLB DNS names:
+Update `deck/kong.yaml` with the single NLB DNS:
 
 ```yaml
 services:
   - name: users-api
-    url: http://<actual-users-api-nlb-dns>:80
-    ...
+    url: http://<istio-gateway-nlb-dns>:80
+  - name: tenant-app1
+    url: http://<istio-gateway-nlb-dns>:80
+  # ... all services use the SAME NLB
 ```
 
 Then sync to Konnect:
@@ -313,167 +245,151 @@ deck gateway sync -s deck/kong.yaml \
   --konnect-control-plane-name kong-cloud-gateway-eks
 ```
 
-### Step 6: Enable CloudFront Bypass Prevention (Optional)
-
-If you enabled CloudFront in Step 1, bypass prevention ensures attackers can't hit Kong's public NLB directly to skip WAF.
-
-**Origin mTLS** (recommended — no Kong-side config needed):
-- If you passed `origin_mtls_certificate_arn` in Step 1, mTLS is already active.
-- CloudFront presents the client certificate during TLS handshake; Kong rejects connections without a valid cert.
-- Configure Kong Cloud Gateway to require client certificates (contact Kong support or configure via Konnect).
-
-**Custom origin header** (optional defense-in-depth):
-1. Edit `deck/kong.yaml` — uncomment the `pre-function` plugin
-2. Replace `<YOUR_CF_ORIGIN_SECRET>` with the same value used for `cf_origin_header_value`
-3. Re-sync to Konnect:
-   ```bash
-   deck gateway sync -s deck/kong.yaml \
-     --konnect-addr https://au.api.konghq.com \
-     --konnect-token $KONNECT_TOKEN \
-     --konnect-control-plane-name kong-cloud-gateway-eks
-   ```
-
-> **Tip:** mTLS alone is sufficient for bypass prevention. The custom header adds application-layer defense-in-depth but is not required if mTLS is enabled.
-
-### Step 7: Test
+## Verification
 
 ```bash
-# Get the application URL
-# If CloudFront enabled: use CloudFront domain
-export APP_URL=$(terraform -chdir=terraform output -raw application_url)
-# If CloudFront not enabled: use Kong Cloud Gateway proxy URL from Konnect dashboard
-# export APP_URL="https://<your-cloud-gw-proxy-url>"
+# Check Istio components
+kubectl get pods -n istio-system
 
-# Test health
-curl -s $APP_URL/healthz
+# Check Gateway status
+kubectl get gateway -n istio-ingress
 
-# Test apps
-curl -s $APP_URL/app1
-curl -s $APP_URL/app2
+# Check HTTPRoutes
+kubectl get httproute -A
 
-# Test authenticated API
-TOKEN=$(./scripts/02-generate-jwt.sh | grep "^ey")
-curl -s -H "Authorization: Bearer $TOKEN" $APP_URL/api/users | jq .
+# Check backend pods
+kubectl get pods -n sample-apps
+kubectl get pods -n api-services
+kubectl get pods -n gateway-health
 
-# Verify CloudFront bypass prevention
-# With mTLS: connection rejected (TLS handshake fails without client cert)
-# With custom header: returns 403 (missing X-CF-Secret)
-# curl -s "https://<kong-cloud-gw-proxy-url>/healthz"
+# Check NLB endpoint
+kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
+  -o jsonpath='{.status.addresses[0].value}'
+
+# Test via Kong Cloud Gateway
+export KONG_URL="https://<kong-cloud-gw-proxy-url>"
+curl $KONG_URL/healthz
+curl $KONG_URL/app1
+curl $KONG_URL/app2
+curl -H "Authorization: Bearer $(./scripts/02-generate-jwt.sh | tail -1)" $KONG_URL/api/users
 ```
 
-## Observability & Troubleshooting
-
-With Dedicated Cloud Gateway, the telemetry subsystem is fully active — all metrics (request volume, latency P50/P95/P99, status codes, bandwidth, consumer analytics) flow to Konnect automatically. View at: https://cloud.konghq.com → Analytics
-
-### Transit Gateway Connectivity
+## ArgoCD UI Access
 
 ```bash
-# Verify Transit Gateway exists
-aws ec2 describe-transit-gateways --filter Name=tag:Name,Values="*kong*"
+# Get admin password
+terraform -chdir=terraform output -raw argocd_admin_password
 
-# Check TGW attachments (should show both your VPC and Kong's)
-aws ec2 describe-transit-gateway-attachments --filter Name=transit-gateway-id,Values=$(terraform -chdir=terraform output -raw transit_gateway_id)
-
-# Check route tables include Kong CIDR
-aws ec2 describe-route-tables --filter Name=vpc-id,Values=$(terraform -chdir=terraform output -raw vpc_id) | jq '.RouteTables[].Routes[] | select(.DestinationCidrBlock == "192.168.0.0/16")'
-```
-
-### Internal NLB Endpoints
-
-```bash
-# Check all internal NLBs are provisioned
-kubectl get svc -A -o wide | grep LoadBalancer
-
-# If NLB is stuck in "pending":
-# - Check AWS LB Controller is running
-kubectl get pods -n kube-system | grep aws-load-balancer
-
-# - Check service annotations are correct
-kubectl describe svc users-api -n api
-```
-
-### ArgoCD Application Status
-
-```bash
-# Check all ArgoCD applications
-kubectl get applications -n argocd
-
-# Check a specific application
-kubectl get app users-api -n argocd -o yaml
-```
-
-**Access ArgoCD UI:**
-
-```bash
-# Port-forward the ArgoCD server
+# Port-forward
 kubectl port-forward svc/argocd-server -n argocd 8080:443
 
-# Get the initial admin password
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+# Open https://localhost:8080 (user: admin)
 ```
 
-Then open https://localhost:8080 in your browser. Login with username `admin` and the password from the command above.
+## Directory Structure
 
-### Kong Cloud Gateway Status
-
-Check in Konnect dashboard:
-- **Gateway Manager → Data Plane Nodes**: Should show healthy data plane pods
-- **Gateway Manager → Networks**: Network status should be "Ready"
-- **Gateway Manager → Transit Gateways**: Attachment should be "Active"
-
-### CloudFront + WAF
-
-```bash
-# Check CloudFront distribution status
-aws cloudfront get-distribution --id $(terraform -chdir=terraform output -raw cloudfront_distribution_id) | jq '.Distribution.Status'
-
-# Check WAF metrics
-aws cloudwatch get-metric-statistics \
-  --namespace "AWS/WAFV2" \
-  --metric-name "AllowedRequests" \
-  --dimensions Name=WebACL,Value=$(terraform -chdir=terraform output -raw waf_web_acl_arn | awk -F'/' '{print $NF}') \
-  --start-time $(date -u -v-1H +%Y-%m-%dT%H:%M:%S) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
-  --period 300 \
-  --statistics Sum
-
-# Verify CloudFront bypass prevention
-# Direct to Kong (mTLS: TLS handshake fails; custom header: returns 403):
-curl -s "https://<kong-cloud-gw-proxy-url>/healthz"
-
-# Via CloudFront (should succeed):
-curl -s "https://<cloudfront-domain>/healthz"
+```
+.
+├── argocd/
+│   └── apps/
+│       ├── root-app.yaml              # App of Apps root
+│       ├── 00-gateway-api-crds.yaml   # Gateway API CRDs (wave -2)
+│       ├── 01-namespaces.yaml         # Namespaces with ambient labels (wave 1)
+│       ├── 02-istio-base.yaml         # Istio Base CRDs (wave -1)
+│       ├── 03-istiod.yaml             # Istio control plane (wave 0)
+│       ├── 04-istio-cni.yaml          # Istio CNI for ambient (wave 0)
+│       ├── 05-ztunnel.yaml            # ztunnel L4 mTLS proxy (wave 0)
+│       ├── 06-gateway.yaml            # Istio Gateway resource (wave 5)
+│       ├── 07-httproutes.yaml         # HTTPRoutes (wave 6)
+│       └── 08-apps.yaml               # Backend applications (wave 7)
+├── certs/                             # TLS certificates (generated)
+├── deck/
+│   └── kong.yaml                      # Kong declarative config (decK)
+├── docs/
+│   └── images/                        # Architecture diagrams
+├── k8s/
+│   ├── namespace.yaml                 # Namespaces with ambient labels
+│   ├── apps/
+│   │   ├── app1-deployment.yaml       # Sample App 1
+│   │   ├── app1-service.yaml          # ClusterIP Service
+│   │   ├── app2-deployment.yaml       # Sample App 2
+│   │   ├── app2-service.yaml          # ClusterIP Service
+│   │   ├── health-responder.yaml      # Health check service
+│   │   └── sample-api.yaml            # Users API + HTTPRoute
+│   └── istio/
+│       ├── gateway.yaml               # Istio Gateway (single internal NLB)
+│       ├── httproutes.yaml            # Path-based routing rules
+│       └── tls-secret.yaml            # TLS secret template
+├── scripts/
+│   ├── 01-generate-certs.sh           # Generate TLS certs for Gateway
+│   ├── 02-setup-cloud-gateway.sh      # Create Kong Cloud GW in Konnect
+│   ├── 02-generate-jwt.sh             # Generate JWT token for testing
+│   ├── 03-post-terraform-setup.sh     # Display NLB endpoint
+│   └── destroy.sh                     # Automated teardown
+└── terraform/
+    ├── main.tf                        # Main config (VPC, EKS, TGW, ArgoCD)
+    ├── variables.tf                   # Input variables
+    ├── providers.tf                   # Provider configuration
+    ├── outputs.tf                     # Output values
+    └── modules/
+        ├── vpc/                       # VPC, subnets, NAT Gateway
+        ├── eks/                       # EKS cluster, node groups
+        ├── iam/                       # IAM roles (LB Controller IRSA)
+        ├── lb-controller/             # AWS LB Controller (for Istio Gateway NLB)
+        ├── argocd/                    # ArgoCD installation
+        └── cloudfront/                # CloudFront + WAF (optional)
 ```
 
-### DNS Resolution
+## Istio Ambient Mesh
 
-If Kong Cloud Gateway can't reach your services:
-1. Verify Transit Gateway attachment is accepted and active
-2. Verify VPC route tables have a route for Kong CIDR → Transit Gateway
-3. Verify Security Groups allow inbound from Kong CIDR (192.168.0.0/16)
-4. Verify internal NLBs are healthy:
-   ```bash
-   aws elbv2 describe-target-health --target-group-arn <tg-arn>
-   ```
+This POC uses **Istio Ambient mode**, which provides service mesh capabilities without sidecar proxies:
 
-## Teardown
+| Component | Purpose | Deployment |
+|-----------|---------|------------|
+| **istiod** | Control plane, config distribution | Deployment in istio-system |
+| **istio-cni** | Network rules for traffic interception | DaemonSet on all nodes |
+| **ztunnel** | L4 mTLS proxy for pod-to-pod encryption | DaemonSet on all nodes |
+
+Namespaces opt into the mesh via the label `istio.io/dataplane-mode: ambient`. No sidecar injection is needed, and applications require zero code changes.
+
+## Cleanup
 
 ```bash
-# Tear down EKS infrastructure (including CloudFront if enabled)
+# Automated teardown
 ./scripts/destroy.sh
 
-# Then delete Cloud Gateway in Konnect (separate infrastructure):
-# Option A: Konnect UI → Gateway Manager → Delete
-# Option B: Konnect API or Terraform
+# Then delete Kong Cloud Gateway in Konnect UI
+# https://cloud.konghq.com -> Gateway Manager -> Delete
 ```
 
-> **Important:** The Cloud Gateway runs in Kong's infrastructure and must be deleted separately in Konnect. The `destroy.sh` script only tears down your AWS resources.
+## Network Architecture
 
-## Related Projects
+```
+Your AWS Account                              Kong's AWS Account
+================                              ==================
 
-| Repository | Description |
-|------------|-------------|
-| [Kong-Konnect-Gateway-on-EKS](https://github.com/shanaka-versent/Kong-Konnect-Gateway-on-EKS) | Kong on EKS with Konnect as source (self-hosted DP, full Konnect features) |
-| [EKS-Kong-GatewayAPI-Demo](https://github.com/shanaka-versent/EKS-Kong-GatewayAPI-Demo) | Kong on EKS with K8s Gateway API (KIC + Gateway Discovery) |
-| [EKS-Istio-GatewayAPI-Demo](https://github.com/shanaka-versent/EKS-Istio-GatewayAPI-Deom/tree/k8s-gateway-api-poc) | Istio Gateway API on AWS EKS |
-| [AKS-Istio-GatewayAPI-Demo](https://github.com/shanaka-versent/AKS-Istio-GatewayAPI-Demo/tree/k8s-gateway-api-poc) | Istio Gateway API on Azure AKS |
+VPC (10.0.0.0/16)                            DCGW VPC (192.168.0.0/16)
+├── Private Subnets                          ├── Kong Data Plane Pods
+│   ├── EKS Nodes                            │   (auto-scaled, managed)
+│   │   ├── Istio Control Plane              │
+│   │   ├── Istio Gateway Pod ──────────┐    ├── Kong Cloud GW NLB (public)
+│   │   ├── Backend App Pods             │    │   (internet-facing)
+│   │   └── ztunnel (mTLS)               │    │
+│   │                                     │    │
+│   └── Internal NLB ◄───────────────────┘    │
+│       (single entry point)                   │
+│                                              │
+├── Transit Gateway ◄─────────────────────────►│ Transit Gateway Attachment
+│   (shared via RAM)                           │
+│                                              │
+└── Route: 192.168.0.0/16 → TGW              └── Route: 10.0.0.0/16 → TGW
+```
+
+## Security Layers
+
+1. **Edge**: CloudFront + WAF (DDoS, SQLi/XSS, rate limiting) -- optional
+2. **Origin mTLS**: CloudFront client certificate to Kong -- optional
+3. **Kong Plugins**: JWT auth, rate limiting, CORS, request transformation
+4. **Transit Gateway**: Private connectivity (no public exposure of backend)
+5. **Istio Ambient mTLS**: Automatic L4 encryption between all mesh pods
+6. **ClusterIP Services**: No direct external access to backend services

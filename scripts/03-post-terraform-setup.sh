@@ -1,14 +1,15 @@
 #!/bin/bash
-# EKS Kong Konnect Cloud Gateway - Post-Terraform Setup
+# Kong Cloud Gateway on EKS - Post-Terraform Setup
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# Run this script AFTER 'terraform apply' to display the internal NLB
-# endpoints needed for Konnect service configuration.
+# Run this script AFTER 'terraform apply' AND after ArgoCD has synced
+# (Istio Gateway created the internal NLB).
 #
 # What it does:
-#   1. Reads Terraform outputs (VPC ID, Transit Gateway ID, internal NLB DNS names)
-#   2. Displays endpoints for Konnect service upstream configuration
-#   3. Shows Transit Gateway setup instructions
+#   1. Reads Terraform outputs (VPC ID, Transit Gateway ID)
+#   2. Waits for the Istio Gateway NLB to be provisioned
+#   3. Displays the single NLB endpoint for Konnect service configuration
+#   4. Shows Transit Gateway setup instructions
 #
 # Usage:
 #   ./scripts/03-post-terraform-setup.sh
@@ -55,18 +56,39 @@ read_terraform_outputs() {
 }
 
 # ---------------------------------------------------------------------------
-# Get internal NLB endpoints from K8s
+# Get Istio Gateway NLB endpoint
 # ---------------------------------------------------------------------------
-get_service_endpoints() {
-    log "Fetching internal NLB endpoints from K8s services..."
+get_gateway_endpoint() {
+    log "Fetching Istio Gateway NLB endpoint..."
     echo ""
 
-    for svc_info in "api/users-api" "tenant-app1/sample-app-1" "tenant-app2/sample-app-2" "gateway-health/health-responder"; do
-        ns="${svc_info%%/*}"
-        svc="${svc_info##*/}"
-        endpoint=$(kubectl get svc "$svc" -n "$ns" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
-        echo "  ${svc} (${ns}): ${endpoint}"
+    # Wait for Gateway to be ready
+    for i in {1..30}; do
+        GATEWAY_STATUS=$(kubectl get gateway -n istio-ingress kong-cloud-gw-gateway -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null) || true
+        if [ "$GATEWAY_STATUS" = "True" ]; then
+            log "Gateway is ready"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            warn "Timeout waiting for Gateway. It may still be provisioning."
+            warn "Check: kubectl get gateway -n istio-ingress"
+            return
+        fi
+        echo -n "."
+        sleep 10
     done
+
+    NLB_HOSTNAME=$(kubectl get gateway -n istio-ingress kong-cloud-gw-gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "pending")
+
+    echo ""
+    echo "=========================================="
+    echo "  Istio Gateway NLB Endpoint"
+    echo "=========================================="
+    echo ""
+    echo "  NLB DNS: ${NLB_HOSTNAME}"
+    echo ""
+    echo "  This is the SINGLE entry point for all Kong Cloud Gateway traffic."
+    echo "  All services in deck/kong.yaml should use this NLB hostname."
     echo ""
 }
 
@@ -79,13 +101,17 @@ show_konnect_config() {
     echo "  Konnect Service Configuration"
     echo "=========================================="
     echo ""
-    echo "Update deck/kong.yaml service URLs with the internal NLB endpoints above."
-    echo "Format: http://<internal-nlb-dns>:80"
+    echo "Update ALL service URLs in deck/kong.yaml with the Istio Gateway NLB:"
     echo ""
-    echo "Example:"
     echo "  services:"
     echo "    - name: users-api"
-    echo "      url: http://<users-api-nlb-dns>:80"
+    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
+    echo "    - name: tenant-app1"
+    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
+    echo "    - name: tenant-app2"
+    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
+    echo "    - name: gateway-health"
+    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
     echo ""
     echo "Then sync to Konnect:"
     echo "  deck gateway sync -s deck/kong.yaml \\"
@@ -104,22 +130,22 @@ show_transit_gw_instructions() {
     echo "  Transit Gateway Setup"
     echo "=========================================="
     echo ""
-    echo "To connect Kong Cloud Gateway to your EKS services:"
+    echo "To connect Kong Cloud Gateway to the Istio Gateway NLB:"
     echo ""
     echo "  1. Set up Konnect Cloud Gateway:"
-    echo "     ./scripts/01-setup-cloud-gateway.sh"
+    echo "     ./scripts/02-setup-cloud-gateway.sh"
     echo ""
     echo "  2. Accept TGW attachment in AWS Console:"
-    echo "     VPC → Transit Gateway Attachments → Accept"
+    echo "     VPC -> Transit Gateway Attachments -> Accept"
     echo ""
-    echo "  3. Update VPC route tables:"
-    echo "     Add route: 192.168.0.0/16 → Transit Gateway (${TRANSIT_GW_ID:-tgw-xxx})"
+    echo "  3. VPC route tables are auto-configured by Terraform:"
+    echo "     Route: 192.168.0.0/16 -> Transit Gateway (${TRANSIT_GW_ID:-tgw-xxx})"
     echo ""
-    echo "  4. Update Security Groups:"
+    echo "  4. Security Groups are auto-configured by Terraform:"
     echo "     Allow inbound from 192.168.0.0/16 (Kong Cloud GW CIDR)"
     echo ""
     echo "  5. Configure DNS in Konnect:"
-    echo "     Map internal NLB DNS names or create Private Hosted Zone"
+    echo "     Map the Istio Gateway NLB DNS or create Private Hosted Zone"
     echo ""
 }
 
@@ -129,12 +155,13 @@ show_transit_gw_instructions() {
 main() {
     echo ""
     echo "=============================================="
-    echo "  Post-Terraform Setup — Cloud Gateway"
+    echo "  Post-Terraform Setup -- Kong Cloud Gateway"
+    echo "  with Istio Gateway (K8s Gateway API)"
     echo "=============================================="
     echo ""
 
     read_terraform_outputs
-    get_service_endpoints
+    get_gateway_endpoint
     show_konnect_config
     show_transit_gw_instructions
 }

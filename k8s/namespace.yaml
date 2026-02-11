@@ -1,0 +1,37 @@
+# Kong Cloud Gateway on EKS - Namespaces with Istio Ambient Mesh
+# @author Shanaka Jayasundera - shanakaj@gmail.com
+#
+# IMPORTANT: Label istio.io/dataplane-mode: ambient enables Ambient mesh (NO sidecars)
+# All namespaces enrolled in Ambient mesh get automatic L4 mTLS via ztunnel
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: istio-ingress
+  labels:
+    istio.io/dataplane-mode: ambient
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-health
+  labels:
+    istio.io/dataplane-mode: ambient
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sample-apps
+  labels:
+    istio.io/dataplane-mode: ambient
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: api-services
+  labels:
+    istio.io/dataplane-mode: ambient

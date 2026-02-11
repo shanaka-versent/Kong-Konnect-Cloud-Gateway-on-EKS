@@ -1,29 +1,31 @@
-# ArgoCD App: Gateway Health
+# ArgoCD App: Istio Base CRDs
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# Deploys health-responder for Kong Cloud Gateway health checks.
-# Kong Cloud Gateway routes /healthz to this service via Transit Gateway.
+# LAYER 3: EKS Customizations (ArgoCD)
+# Sync Wave: -1 (before istiod - installs Istio CRDs)
 
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: gateway-health
+  name: istio-base
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-wave: "-1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
 
   source:
-    repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
-    targetRevision: HEAD
-    path: k8s/gateway-health
+    repoURL: https://istio-release.storage.googleapis.com/charts
+    chart: base
+    targetRevision: 1.24.0
+    helm:
+      releaseName: istio-base
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: gateway-health
+    namespace: istio-system
 
   syncPolicy:
     automated:
