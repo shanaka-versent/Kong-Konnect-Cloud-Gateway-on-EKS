@@ -241,6 +241,69 @@ How it works:
 | 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods |
 | 6 | ClusterIP Services | No direct external access to backend services |
 
+### Architecture Layers
+
+System nodes handle critical add-ons (tainted with `CriticalAddonsOnly`), while User nodes run application workloads. DaemonSets (istio-cni, ztunnel) run on **all** nodes via tolerations.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '16px'}, 'flowchart': {'nodeSpacing': 50, 'rankSpacing': 80, 'padding': 30}}}%%
+flowchart TB
+    subgraph EKS["EKS Cluster"]
+        subgraph SystemPool["System Node Pool<br/>(Taint: CriticalAddonsOnly)"]
+            subgraph KS["kube-system"]
+                LBC2[aws-lb-controller]
+                CoreDNS[coredns]
+                KubeProxy[kube-proxy]
+            end
+            subgraph IS["istio-system"]
+                Istiod2[istiod]
+                CNI2[istio-cni<br/>DaemonSet]
+                ZT2[ztunnel<br/>DaemonSet]
+            end
+            subgraph II["istio-ingress"]
+                GW2[Istio Gateway]
+            end
+            subgraph AC["argocd"]
+                ArgoServer[argocd-server]
+            end
+        end
+
+        subgraph UserPool["User Node Pool<br/>(No Taint)"]
+            subgraph GH["gateway-health"]
+                HealthResp[health-responder]
+            end
+            subgraph SA["sample-apps"]
+                App1B[sample-app-1]
+                App2B[sample-app-2]
+            end
+            subgraph AS["api-services"]
+                ApiB[users-api]
+            end
+        end
+    end
+
+    Note["Note: DaemonSets (istio-cni, ztunnel)<br/>run on ALL nodes with tolerations"]
+
+    style EKS fill:#E8E8E8,stroke:#999,color:#333
+    style SystemPool fill:#F0F0F0,stroke:#BBB,color:#333
+    style UserPool fill:#F0F0F0,stroke:#BBB,color:#333
+    style KS fill:#F5F5F5,stroke:#CCC,color:#333
+    style IS fill:#F5F5F5,stroke:#CCC,color:#333
+    style II fill:#F5F5F5,stroke:#CCC,color:#333
+    style AC fill:#F5F5F5,stroke:#CCC,color:#333
+    style GH fill:#F5F5F5,stroke:#CCC,color:#333
+    style SA fill:#F5F5F5,stroke:#CCC,color:#333
+    style AS fill:#F5F5F5,stroke:#CCC,color:#333
+    style Note fill:#FFFBE6,stroke:#E6D800,color:#333
+```
+
+| Node Pool | Taint | Components | Purpose |
+|-----------|-------|------------|---------|
+| **System** | `CriticalAddonsOnly=true:NoSchedule` | istiod, istio-cni, ztunnel, aws-lb-controller, ArgoCD, coredns | Infrastructure and mesh control plane |
+| **User** | None | health-responder, sample-app-1/2, users-api | Application workloads |
+
+> istiod uses `nodeSelector: node-role: system` to pin to system nodes. istio-cni and ztunnel are DaemonSets with `CriticalAddonsOnly` tolerations so they run on all nodes.
+
 ---
 
 ## Prerequisites
