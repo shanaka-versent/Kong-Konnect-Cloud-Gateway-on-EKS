@@ -86,6 +86,35 @@ graph TB
     style ns_api fill:#F5F5F5,stroke:#CCC,color:#333
 ```
 
+### End-to-End Encryption
+
+TLS terminates and re-encrypts at each trust boundary. Traffic is never unencrypted on public networks.
+
+```mermaid
+graph LR
+    C([Client]) -->|"🔒 TLS 1.3"| CF
+    CF[CloudFront<br/>+ WAF] -->|"🔒 HTTPS +<br/>Origin mTLS cert"| Kong
+    Kong[Kong Cloud<br/>Gateway] -->|"HTTP — private<br/>AWS backbone<br/>via Transit GW"| NLB[Internal<br/>NLB]
+    NLB -->|"HTTP"| IGW[Istio<br/>Gateway]
+    IGW -->|"🔒 mTLS<br/>ztunnel L4"| Pod[Backend<br/>Pod]
+
+    style C fill:#fff,stroke:#333,color:#333
+    style CF fill:#F68D2E,color:#fff
+    style Kong fill:#003459,color:#fff
+    style NLB fill:#232F3E,color:#fff
+    style IGW fill:#466BB0,color:#fff
+    style Pod fill:#2E8B57,color:#fff
+```
+
+| Hop | Protocol | Encryption | Terminates At |
+|-----|----------|-----------|---------------|
+| Client → CloudFront | HTTPS | TLS 1.2/1.3 (AWS-managed cert) | CloudFront edge |
+| CloudFront → Kong | HTTPS | TLS + Origin mTLS client certificate | Kong Cloud Gateway |
+| Kong → NLB (via TGW) | HTTP | None (private AWS backbone, no internet) | — |
+| Istio Gateway → Pod | HTTP | Istio Ambient mTLS (ztunnel L4) | Backend pod |
+
+> **Note:** The Kong → NLB segment uses HTTP over private Transit Gateway connectivity (never traverses the public internet). For full end-to-end TLS on this segment, see Step 7 (Optional TLS Certificates) which adds TLS termination at the Istio Gateway.
+
 ### Traffic Flow
 
 ```mermaid
@@ -95,24 +124,27 @@ sequenceDiagram
     box Kong's AWS Account
         participant K as Kong Cloud Gateway
     end
-    participant TGW as Transit Gateway (RAM Shared)
+    participant TGW as Transit Gateway
     box Your AWS Account — EKS
         participant NLB as Internal NLB
         participant IG as Istio Gateway
         participant HR as HTTPRoute
+        participant ZT as ztunnel
         participant P as Backend Pod
     end
 
-    C->>CF: HTTPS Request
-    CF->>K: HTTPS (origin mTLS bypass prevention)
-    Note over K: JWT Auth, Rate Limiting,<br/>CORS, Request Transform
-    K->>TGW: HTTP to NLB DNS (private, no internet)
+    C->>CF: HTTPS (TLS 1.3)
+    Note over CF: TLS terminates<br/>WAF inspection
+    CF->>K: HTTPS + Origin mTLS cert
+    Note over K: TLS terminates<br/>JWT Auth, Rate Limiting,<br/>CORS, Request Transform
+    K->>TGW: HTTP (private network)
     Note over TGW: 192.168.0.0/16 ↔ 10.0.0.0/16
-    TGW->>NLB: Private routing via AWS backbone
-    NLB->>IG: Forward to Istio Gateway pod
+    TGW->>NLB: HTTP (AWS backbone)
+    NLB->>IG: HTTP
     IG->>HR: Match path (/app1, /api/users, etc.)
-    HR->>P: Route to ClusterIP Service
-    Note over P: Pod-to-pod mTLS via<br/>Istio Ambient ztunnel
+    HR->>ZT: Route to ClusterIP Service
+    Note over ZT: Istio Ambient<br/>mTLS encryption (L4)
+    ZT->>P: mTLS encrypted
     P-->>C: Response (reverse path)
 ```
 
