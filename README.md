@@ -338,8 +338,8 @@ curl -H "Authorization: Bearer $(./scripts/02-generate-jwt.sh | tail -1)" \
 
 ```bash
 terraform -chdir=terraform output -raw argocd_admin_password
-kubectl port-forward svc/argocd-server -n argocd 8080:443
-# Open https://localhost:8080 (user: admin)
+kubectl port-forward svc/argocd-server -n argocd 8080:80
+# Open http://localhost:8080 (user: admin)
 ```
 
 ---
