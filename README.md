@@ -303,7 +303,7 @@ Namespaces opt into the mesh via the label `istio.io/dataplane-mode: ambient`. N
 cp .env.example .env
 ```
 
-Edit `.env` with your Konnect token and region:
+Edit `.env` — you only need to set **3 values** (Konnect credentials):
 
 ```bash
 KONNECT_REGION="au"
@@ -313,6 +313,7 @@ KONNECT_CONTROL_PLANE_NAME="kong-cloud-gateway-eks"
 
 > **`.env` is gitignored** — your token will never be committed to Git.
 > All scripts automatically source `.env` so you don't need to export variables manually.
+> Transit Gateway IDs, NLB DNS, and VPC CIDR are **auto-read from Terraform outputs** — no manual entry needed.
 
 ### Step 2: Deploy Infrastructure (Terraform)
 
@@ -323,15 +324,6 @@ terraform apply
 ```
 
 Creates: VPC, EKS cluster, node groups, AWS LB Controller, Transit Gateway, RAM share, ArgoCD.
-
-Then update `.env` with Terraform outputs:
-
-```bash
-# Add these to your .env file
-TRANSIT_GATEWAY_ID="$(terraform -chdir=terraform output -raw transit_gateway_id)"
-RAM_SHARE_ARN="$(terraform -chdir=terraform output -raw ram_share_arn)"
-EKS_VPC_CIDR="$(terraform -chdir=terraform output -raw vpc_cidr)"
-```
 
 ### Step 3: Configure kubectl
 
