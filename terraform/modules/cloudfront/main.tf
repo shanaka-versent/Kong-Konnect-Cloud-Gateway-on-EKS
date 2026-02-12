@@ -275,7 +275,7 @@ resource "aws_cloudformation_stack" "cloudfront" {
   name = "${var.name_prefix}-cloudfront-dist"
 
   parameters = {
-    Comment                    = "${var.name_prefix} - CloudFront WAF > Kong Cloud Gateway"
+    Comment                    = "${var.name_prefix} - CloudFront WAF - Kong Cloud Gateway"
     PriceClass                 = var.price_class
     WebACLArn                  = var.enable_waf ? aws_wafv2_web_acl.main[0].arn : ""
     Aliases                    = var.custom_domain

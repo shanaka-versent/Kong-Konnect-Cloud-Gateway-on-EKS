@@ -11,8 +11,9 @@
 # 2. Wait for Internal NLB to be fully deprovisioned
 # 3. Delete ArgoCD applications (cascade deletes Istio components, apps)
 # 4. Cleanup Istio CRDs and remaining K8s resources
-# 5. Run terraform destroy (handles EKS, VPC, Transit Gateway, RAM share)
-# 6. Delete Kong Cloud Gateway in Konnect via API (config, network, control plane)
+# 5. Run terraform destroy (handles EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF)
+# 6. Cleanup orphaned CloudFront CloudFormation stacks (safety net)
+# 7. Delete Kong Cloud Gateway in Konnect via API (config, network, control plane)
 #
 # WHY THIS ORDER:
 # The Istio Gateway creates an internal NLB via the AWS LB Controller.
@@ -202,7 +203,7 @@ cleanup_k8s_resources() {
 # Step 5: Terraform destroy
 # ---------------------------------------------------------------------------
 terraform_destroy() {
-    log "Step 5: Running terraform destroy..."
+    log "Step 5: Running terraform destroy (EKS, VPC, Transit Gateway, CloudFront + WAF)..."
 
     cd "$TERRAFORM_DIR"
 
@@ -210,9 +211,47 @@ terraform_destroy() {
         terraform init
     fi
 
-    terraform destroy -auto-approve
+    # Pass terraform.tfvars if it exists (contains kong_cloud_gateway_domain for CloudFront)
+    local tf_args="-auto-approve"
+    if [[ -f "terraform.tfvars" ]]; then
+        tf_args="-var-file=terraform.tfvars -auto-approve"
+    fi
+
+    terraform destroy $tf_args
 
     log "Terraform destroy complete."
+}
+
+# ---------------------------------------------------------------------------
+# Step 6: Cleanup orphaned CloudFront CloudFormation stacks (safety net)
+# ---------------------------------------------------------------------------
+# The CloudFront distribution is deployed via CloudFormation (for origin mTLS
+# support). If terraform destroy fails to clean it up, this step removes it.
+cleanup_cloudfront_cfn_stacks() {
+    log "Step 6: Checking for orphaned CloudFront CloudFormation stacks..."
+
+    local stack_name="kong-gw-poc-cloudfront-dist"
+    local stack_status
+    stack_status=$(aws cloudformation describe-stacks --stack-name "$stack_name" \
+        --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND")
+
+    if [[ "$stack_status" != "NOT_FOUND" ]]; then
+        log "  Found CloudFormation stack '${stack_name}' (status: ${stack_status})"
+
+        if [[ "$stack_status" == "DELETE_FAILED" || "$stack_status" == "ROLLBACK_COMPLETE" ]]; then
+            log "  Deleting stack in ${stack_status} state..."
+            aws cloudformation delete-stack --stack-name "$stack_name" || true
+        elif [[ "$stack_status" != "DELETE_IN_PROGRESS" && "$stack_status" != "DELETE_COMPLETE" ]]; then
+            log "  Deleting CloudFront CloudFormation stack..."
+            aws cloudformation delete-stack --stack-name "$stack_name" || true
+        fi
+
+        log "  Waiting for stack deletion..."
+        aws cloudformation wait stack-delete-complete --stack-name "$stack_name" 2>/dev/null || true
+        log "  CloudFront CloudFormation stack cleaned up."
+    else
+        log "  No orphaned CloudFormation stacks found."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -227,7 +266,7 @@ terraform_destroy() {
 # Requires KONNECT_REGION and KONNECT_TOKEN (from .env)
 # ---------------------------------------------------------------------------
 delete_konnect_resources() {
-    log "Step 6: Deleting Kong Cloud Gateway resources in Konnect..."
+    log "Step 7: Deleting Kong Cloud Gateway resources in Konnect..."
 
     if [[ -z "${KONNECT_REGION:-}" || -z "${KONNECT_TOKEN:-}" ]]; then
         warn "KONNECT_REGION or KONNECT_TOKEN not set. Skipping Konnect cleanup."
@@ -354,6 +393,7 @@ main() {
     echo "  - Istio Ambient mesh (istiod, cni, ztunnel)"
     echo "  - All backend applications"
     echo "  - ArgoCD and all managed apps"
+    echo "  - CloudFront distribution + WAF Web ACL"
     echo "  - EKS cluster, VPC, Transit Gateway"
     echo ""
 
@@ -373,10 +413,11 @@ main() {
     fi
 
     terraform_destroy
+    cleanup_cloudfront_cfn_stacks
     delete_konnect_resources
 
     echo ""
-    log "Full stack teardown complete (EKS + Konnect)."
+    log "Full stack teardown complete (EKS + CloudFront + WAF + Konnect)."
     echo ""
 }
 

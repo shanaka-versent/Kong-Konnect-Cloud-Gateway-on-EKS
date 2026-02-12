@@ -467,12 +467,12 @@ deck gateway sync deck/kong.yaml \
 
 ### Step 7: Deploy CloudFront + WAF
 
-After the Kong Cloud Gateway is provisioned (Step 5), get the proxy URL from [Konnect UI](https://cloud.konghq.com) → **Gateway Manager** → **kong-cloud-gateway-eks** → **Proxy URL**.
+After the Kong Cloud Gateway is provisioned (Step 5), get the **Public Edge DNS** from [Konnect UI](https://cloud.konghq.com) → **Gateway Manager** → **kong-cloud-gateway-eks** → **Connect**.
 
-Add the Kong proxy domain to `terraform.tfvars`:
+Add the Kong proxy domain to `terraform/terraform.tfvars`:
 
 ```hcl
-kong_cloud_gateway_domain = "<hash>.au.kong-cloud.com"
+kong_cloud_gateway_domain = "<hash>.aws-ap-southeast-2.edge.gateways.konggateway.com"
 ```
 
 Re-run Terraform to deploy CloudFront + WAF:
@@ -561,7 +561,8 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 3. **Delete ArgoCD apps** → cascade removes Istio components and workloads
 4. **Cleanup CRDs** → removes Gateway API and Istio CRDs (finalizers)
 5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF
-6. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
+6. **Cleanup CloudFront CloudFormation stacks** → safety net for orphaned CFN stacks
+7. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
 
 > The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
 
