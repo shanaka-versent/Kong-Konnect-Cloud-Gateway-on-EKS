@@ -35,16 +35,13 @@
 #   - Routes, plugins, consumers via decK / Konnect UI
 #   - All service upstreams point to the single Istio Gateway NLB DNS
 #
-# Layer 6: Edge Security (Terraform -- optional)
+# Layer 6: Edge Security (Terraform)
 #   - CloudFront distribution with WAF (DDoS, SQLi, XSS, rate limiting)
-#   - Custom origin header for CloudFront bypass prevention
+#   - Origin mTLS to prevent direct access to Kong Cloud Gateway
 #   - Security response headers (HSTS, X-Frame-Options, etc.)
 #
-# Traffic Flow (with CloudFront):
+# Traffic Flow:
 # Client --> CloudFront (WAF) --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLB --> Istio Gateway --> Pods
-#
-# Traffic Flow (without CloudFront):
-# Client --> Kong Cloud GW (Kong's infra) --[Transit GW]--> Internal NLB --> Istio Gateway --> Pods
 
 locals {
   name_prefix  = "${var.project_name}-${var.environment}"
@@ -224,14 +221,17 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 }
 
 # ==============================================================================
-# LAYER 6: EDGE SECURITY -- CloudFront + WAF (Optional)
+# LAYER 6: EDGE SECURITY -- CloudFront + WAF
 # ==============================================================================
-# Places CloudFront + WAF in front of Kong's Cloud Gateway proxy URL.
+# CloudFront + WAF sits in front of Kong's Cloud Gateway proxy URL.
+# WAF is mandatory — Kong Cloud Gateway has a public NLB that must be
+# protected from direct access. All client traffic must pass through
+# CloudFront for WAF inspection before reaching Kong.
 #
-# Why: Kong Cloud Gateway has a public NLB. Adding CloudFront provides:
+# What CloudFront + WAF provides:
 # - AWS WAF (DDoS protection, SQLi/XSS filtering, rate limiting, geo-blocking)
 # - Security response headers (HSTS, X-Frame-Options, etc.)
-# - CloudFront edge caching for static assets (optional)
+# - CloudFront edge caching for static assets
 # - Custom domain with ACM certificate
 #
 # CloudFront Bypass Prevention (two layers, either or both):
@@ -251,7 +251,7 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 # 3. Sync: deck gateway sync -s deck/kong.yaml ...
 
 module "cloudfront" {
-  count  = var.enable_cloudfront ? 1 : 0
+  count  = var.enable_cloudfront && var.kong_cloud_gateway_domain != "" ? 1 : 0
   source = "./modules/cloudfront"
 
   providers = {
