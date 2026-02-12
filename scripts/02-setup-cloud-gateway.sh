@@ -212,7 +212,52 @@ create_dp_group() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 4: Attach Transit Gateway (optional)
+# Step 4: Share RAM with Kong's AWS account
+# ---------------------------------------------------------------------------
+share_ram_with_kong() {
+    if [[ -z "${RAM_SHARE_ARN:-}" ]]; then
+        warn "RAM_SHARE_ARN not set. Skipping RAM principal association."
+        return
+    fi
+
+    log "Step 4: Sharing Transit Gateway with Kong's AWS account via RAM"
+
+    # Fetch Kong's AWS account ID from Konnect provider accounts
+    KONG_AWS_ACCOUNT_ID=$(curl -s \
+        -H "Authorization: Bearer $KONNECT_TOKEN" \
+        "https://global.api.konghq.com/v2/cloud-gateways/provider-accounts" \
+        | jq -r '.data[] | select(.provider == "aws") | .provider_account_id' | head -1)
+
+    if [[ -z "$KONG_AWS_ACCOUNT_ID" || "$KONG_AWS_ACCOUNT_ID" == "null" ]]; then
+        warn "Could not determine Kong's AWS account ID from Konnect API."
+        warn "Add Kong's AWS account as a RAM principal manually:"
+        warn "  aws ram associate-resource-share --resource-share-arn ${RAM_SHARE_ARN} --principals <KONG_AWS_ACCOUNT_ID>"
+        return
+    fi
+
+    log "  Kong's AWS Account ID: ${KONG_AWS_ACCOUNT_ID}"
+
+    # Check if already associated
+    EXISTING=$(aws ram get-resource-share-associations \
+        --association-type PRINCIPAL \
+        --resource-share-arns "${RAM_SHARE_ARN}" \
+        --query "resourceShareAssociations[?associatedEntity=='${KONG_AWS_ACCOUNT_ID}'].status" \
+        --output text 2>/dev/null || true)
+
+    if [[ -n "$EXISTING" && "$EXISTING" != "None" ]]; then
+        log "  RAM principal already associated (status: ${EXISTING})"
+        return
+    fi
+
+    aws ram associate-resource-share \
+        --resource-share-arn "${RAM_SHARE_ARN}" \
+        --principals "${KONG_AWS_ACCOUNT_ID}" > /dev/null 2>&1
+
+    log "  RAM share associated with Kong's AWS account"
+}
+
+# ---------------------------------------------------------------------------
+# Step 5: Wait for network to be ready, then attach Transit Gateway
 # ---------------------------------------------------------------------------
 attach_transit_gateway() {
     if [[ -z "${TRANSIT_GATEWAY_ID:-}" || -z "${RAM_SHARE_ARN:-}" || -z "${EKS_VPC_CIDR:-}" ]]; then
@@ -230,7 +275,35 @@ attach_transit_gateway() {
         return
     fi
 
-    log "Step 4: Attaching Transit Gateway to Cloud Gateway Network"
+    # Wait for network to reach 'ready' state before attaching TGW
+    log "Step 5: Waiting for Cloud Gateway Network to be ready..."
+    local max_wait=2400  # 40 minutes
+    local interval=30
+    local waited=0
+
+    while [[ $waited -lt $max_wait ]]; do
+        NETWORK_STATE=$(curl -s \
+            -H "Authorization: Bearer $KONNECT_TOKEN" \
+            "https://global.api.konghq.com/v2/cloud-gateways/networks/${NETWORK_ID}" \
+            | jq -r '.state')
+
+        if [[ "$NETWORK_STATE" == "ready" ]]; then
+            log "  Network is ready"
+            break
+        fi
+
+        log "  Network state: ${NETWORK_STATE} (waited ${waited}s / ${max_wait}s)"
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+
+    if [[ "$NETWORK_STATE" != "ready" ]]; then
+        warn "Network did not reach 'ready' state within ${max_wait}s."
+        warn "Attach Transit Gateway manually once network is ready."
+        return
+    fi
+
+    log "  Attaching Transit Gateway to Cloud Gateway Network"
 
     TGW_RESPONSE=$(curl -s -X POST \
         "https://global.api.konghq.com/v2/cloud-gateways/networks/${NETWORK_ID}/transit-gateways" \
@@ -246,9 +319,41 @@ attach_transit_gateway() {
             }
         }")
 
-    TGW_ID=$(echo "$TGW_RESPONSE" | jq -r '.id // .message // "unknown"')
-    log "  Transit Gateway attachment: $TGW_ID"
-    log "  Accept the attachment in AWS Console: VPC → Transit Gateway Attachments"
+    TGW_ATT_ID=$(echo "$TGW_RESPONSE" | jq -r '.id // .message // "unknown"')
+    log "  Transit Gateway attachment: $TGW_ATT_ID"
+
+    if [[ "$TGW_ATT_ID" == "unknown" || "$TGW_ATT_ID" == "null" ]]; then
+        warn "TGW attachment may have failed. Check Konnect UI."
+        warn "Response: $TGW_RESPONSE"
+        return
+    fi
+
+    # TGW auto_accept_shared_attachments is enabled in Terraform,
+    # so Kong's attachment will be accepted automatically.
+    log "  Transit Gateway attachment created. Auto-accept is enabled."
+    log "  Waiting for attachment to complete..."
+
+    local tgw_waited=0
+    local tgw_max=600  # 10 minutes
+    while [[ $tgw_waited -lt $tgw_max ]]; do
+        TGW_STATE=$(curl -s \
+            -H "Authorization: Bearer $KONNECT_TOKEN" \
+            "https://global.api.konghq.com/v2/cloud-gateways/networks/${NETWORK_ID}/transit-gateways/${TGW_ATT_ID}" \
+            | jq -r '.state')
+
+        if [[ "$TGW_STATE" == "ready" ]]; then
+            log "  Transit Gateway attachment is ready!"
+            return
+        fi
+
+        log "  TGW attachment state: ${TGW_STATE} (waited ${tgw_waited}s)"
+        sleep 30
+        tgw_waited=$((tgw_waited + 30))
+    done
+
+    warn "TGW attachment did not reach 'ready' within ${tgw_max}s."
+    warn "Check AWS Console: VPC → Transit Gateway Attachments"
+    warn "If pending, accept manually. Auto-accept may require the TGW to be shared first."
 }
 
 # ---------------------------------------------------------------------------
@@ -303,6 +408,7 @@ main() {
     create_control_plane
     create_network
     create_dp_group
+    share_ram_with_kong
     attach_transit_gateway
     show_next_steps
 }
