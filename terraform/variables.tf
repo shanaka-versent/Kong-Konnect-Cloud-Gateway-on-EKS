@@ -116,10 +116,13 @@ variable "enable_logging" {
 }
 
 # ==============================================================================
-# CLOUDFRONT + WAF (Optional Edge Security Layer)
+# CLOUDFRONT + WAF (Edge Security Layer)
 # ==============================================================================
-# Places CloudFront + WAF in front of Kong Cloud Gateway's public proxy URL.
-# Provides DDoS protection, SQLi/XSS filtering, rate limiting, and geo-blocking.
+# CloudFront + WAF sits in front of Kong Cloud Gateway's public proxy URL.
+# WAF is mandatory for production — it provides DDoS protection, SQLi/XSS
+# filtering, rate limiting, and geo-blocking. CloudFront also enforces origin
+# mTLS to prevent direct access to Kong Cloud Gateway, ensuring all traffic
+# passes through WAF inspection.
 #
 # CloudFront bypass prevention (two layers):
 # 1. Origin mTLS (strongest): CloudFront presents client cert to Kong origin
@@ -127,13 +130,13 @@ variable "enable_logging" {
 # Either or both can be enabled. mTLS alone is sufficient for bypass prevention.
 
 variable "enable_cloudfront" {
-  description = "Enable CloudFront + WAF in front of Kong Cloud Gateway"
+  description = "Enable CloudFront + WAF in front of Kong Cloud Gateway (required for production)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "kong_cloud_gateway_domain" {
-  description = "Kong Cloud Gateway proxy domain (e.g., <prefix>.au.kong-cloud.com). Required when enable_cloudfront = true."
+  description = "Kong Cloud Gateway proxy domain (e.g., <prefix>.au.kong-cloud.com). Required for CloudFront origin."
   type        = string
   default     = ""
 }

@@ -1,6 +1,8 @@
 # Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)
 
-Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. **CloudFront + WAF** provides edge security with DDoS protection, SQLi/XSS filtering, rate limiting, and origin mTLS bypass prevention.
+Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed.
+
+**CloudFront + WAF** is mandatory — Kong Cloud Gateway has a public-facing NLB that must be protected. All client traffic passes through CloudFront for WAF inspection (DDoS, SQLi/XSS, rate limiting, geo-blocking) before reaching Kong. Origin mTLS prevents direct access to Kong Cloud Gateway, ensuring nobody can bypass WAF.
 
 The entire stack deploys with **zero manual steps** — Terraform provisions infrastructure, ArgoCD syncs K8s resources via GitOps, and scripts handle Konnect API setup including RAM sharing and TGW attachment.
 
@@ -306,7 +308,7 @@ flowchart TB
 
 ## Deployment
 
-Six steps, zero manual console clicks. Terraform handles infrastructure, ArgoCD syncs K8s resources, and scripts automate Konnect setup.
+Seven steps, zero manual console clicks. Terraform handles infrastructure in two phases (CloudFront depends on the Kong proxy URL from Step 5), ArgoCD syncs K8s resources, and scripts automate Konnect setup.
 
 ### Deployment Layers
 
@@ -382,10 +384,11 @@ terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-This creates **everything** in one shot:
+This creates Layers 1-4 in one shot:
 - VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway + RAM share
 - ArgoCD + **root application** (App of Apps) — bootstrapped automatically via the `argocd-apps` Helm chart
-- CloudFront + WAF with origin mTLS (when `enable_cloudfront = true`)
+
+> CloudFront + WAF (Layer 6) is deployed in Step 7 after the Kong proxy URL is available.
 
 ArgoCD immediately begins syncing all child apps via **sync waves** in dependency order:
 
@@ -462,6 +465,30 @@ deck gateway sync deck/kong.yaml \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
 
+### Step 7: Deploy CloudFront + WAF
+
+After the Kong Cloud Gateway is provisioned (Step 5), get the proxy URL from [Konnect UI](https://cloud.konghq.com) → **Gateway Manager** → **kong-cloud-gateway-eks** → **Proxy URL**.
+
+Add the Kong proxy domain to `terraform.tfvars`:
+
+```hcl
+kong_cloud_gateway_domain = "<hash>.au.kong-cloud.com"
+```
+
+Re-run Terraform to deploy CloudFront + WAF:
+
+```bash
+terraform -chdir=terraform apply
+```
+
+This creates:
+- **CloudFront distribution** with Kong Cloud Gateway as the origin
+- **AWS WAF** Web ACL with DDoS, SQLi/XSS, and rate limiting rules
+- **Origin mTLS** to prevent direct access to Kong Cloud Gateway (bypassing WAF)
+- **Security headers** (HSTS, X-Frame-Options, Content-Security-Policy, etc.)
+
+> After deployment, all client traffic must go through the CloudFront URL. Direct access to Kong Cloud Gateway is blocked by origin mTLS.
+
 ---
 
 ## Verification
@@ -486,13 +513,15 @@ kubectl get pods -n api-services
 # TLS secret
 kubectl get secret istio-gateway-tls -n istio-ingress
 
-# End-to-end test via Kong Cloud Gateway
-export KONG_URL="https://<kong-cloud-gw-proxy-url>"
-curl $KONG_URL/healthz
-curl $KONG_URL/app1
-curl $KONG_URL/app2
-curl -H "Authorization: Bearer <jwt-token>" $KONG_URL/api/users
+# End-to-end test via CloudFront (all traffic goes through WAF)
+export APP_URL=$(terraform -chdir=terraform output -raw application_url)
+curl $APP_URL/healthz
+curl $APP_URL/app1
+curl $APP_URL/app2
+curl -H "Authorization: Bearer <jwt-token>" $APP_URL/api/users
 ```
+
+> The `application_url` output returns the CloudFront URL. All requests pass through CloudFront (WAF) → Kong Cloud Gateway → Transit Gateway → Istio Gateway → Backend Pod.
 
 ### ArgoCD UI
 
@@ -531,7 +560,7 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 2. **Wait for NLB/ENI cleanup** → prevents VPC deletion failures
 3. **Delete ArgoCD apps** → cascade removes Istio components and workloads
 4. **Cleanup CRDs** → removes Gateway API and Istio CRDs (finalizers)
-5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront
+5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF
 6. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
 
 > The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
