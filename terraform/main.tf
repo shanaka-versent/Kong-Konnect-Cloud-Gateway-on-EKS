@@ -146,8 +146,8 @@ resource "time_sleep" "wait_for_lb_controller" {
 #
 # After terraform apply:
 # 1. Run scripts/02-setup-cloud-gateway.sh to create Cloud GW and attach TGW
-# 2. Accept the TGW attachment in AWS Console (VPC -> Transit Gateway Attachments)
-# 3. VPC route tables are auto-configured to route Kong's CIDR via TGW
+# 2. VPC route tables are auto-configured to route Kong's CIDR via TGW
+# Note: auto_accept_shared_attachments is enabled — no manual acceptance needed
 
 resource "aws_ec2_transit_gateway" "kong" {
   description = "Transit Gateway for Kong Cloud Gateway connectivity"

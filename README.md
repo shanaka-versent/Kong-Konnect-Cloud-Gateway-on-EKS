@@ -420,10 +420,7 @@ This generates a self-signed CA + server certificate and **automatically creates
 ./scripts/02-setup-cloud-gateway.sh
 ```
 
-This creates the Konnect control plane (with `cloud_gateway: true`), provisions the Cloud Gateway network, creates the data plane group, and attaches the Transit Gateway.
-
-Once the network reaches `ready` state (~30 minutes), accept the Transit Gateway attachment in AWS Console:
-**VPC → Transit Gateway Attachments → Accept**
+This creates the Konnect control plane (with `cloud_gateway: true`), provisions the Cloud Gateway network, shares the Transit Gateway via RAM, waits for the network to be ready (~30 minutes), and attaches the Transit Gateway. The TGW attachment is auto-accepted (`auto_accept_shared_attachments` is enabled).
 
 ### Step 6: Configure Kong Routes
 
