@@ -75,32 +75,31 @@ resource "helm_release" "argocd_root_app" {
 
   values = [
     yamlencode({
-      applications = {
-        cloud-gateway-root = {
-          namespace  = "argocd"
-          finalizers = ["resources-finalizer.argocd.argoproj.io"]
-          project    = "default"
-          source = {
-            repoURL        = var.git_repo_url
-            targetRevision = "HEAD"
-            path           = "argocd/apps"
-          }
-          destination = {
-            server    = "https://kubernetes.default.svc"
-            namespace = "argocd"
-          }
-          syncPolicy = {
-            automated = {
-              prune    = true
-              selfHeal = true
-            }
-            syncOptions = [
-              "CreateNamespace=true",
-              "ApplyOutOfSyncOnly=true"
-            ]
-          }
+      applications = [{
+        name       = "cloud-gateway-root"
+        namespace  = "argocd"
+        finalizers = ["resources-finalizer.argocd.argoproj.io"]
+        project    = "default"
+        source = {
+          repoURL        = var.git_repo_url
+          targetRevision = "HEAD"
+          path           = "argocd/apps"
         }
-      }
+        destination = {
+          server    = "https://kubernetes.default.svc"
+          namespace = "argocd"
+        }
+        syncPolicy = {
+          automated = {
+            prune    = true
+            selfHeal = true
+          }
+          syncOptions = [
+            "CreateNamespace=true",
+            "ApplyOutOfSyncOnly=true"
+          ]
+        }
+      }]
     })
   ]
 
