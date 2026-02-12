@@ -1,6 +1,8 @@
 # Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)
 
-Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics all visible in the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **CloudFront + WAF** provides edge security with origin mTLS bypass prevention. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed.
+Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. **CloudFront + WAF** provides edge security with DDoS protection, SQLi/XSS filtering, rate limiting, and origin mTLS bypass prevention.
+
+The entire stack deploys with **zero manual steps** — Terraform provisions infrastructure, ArgoCD syncs K8s resources via GitOps, and scripts handle Konnect API setup including RAM sharing and TGW attachment.
 
 ---
 
@@ -208,13 +210,13 @@ graph TB
     style ns_api2 fill:#FAFAFA,stroke:#DDD,color:#333
 ```
 
-How it works:
+How it works (all automated):
 
-1. **Terraform** creates an AWS Transit Gateway in your account
-2. **AWS RAM** shares the Transit Gateway with Kong's AWS account
-3. **Kong** attaches their Cloud Gateway VPC to your Transit Gateway
+1. **Terraform** creates the Transit Gateway, VPC attachment, route tables, and security group rules
+2. **Setup script** fetches Kong's AWS account ID from Konnect, adds it as a RAM principal, and creates the TGW attachment
+3. **Transit Gateway** auto-accepts Kong's attachment (`auto_accept_shared_attachments` is enabled)
 4. Route tables on both sides direct cross-VPC traffic through the Transit Gateway
-5. A security group rule allows inbound from Kong's CIDR (`192.168.0.0/16`)
+5. No manual steps — no AWS Console acceptance needed
 
 ### Security Layers
 
@@ -304,9 +306,9 @@ flowchart TB
 
 ## Deployment
 
-### Deployment Layers
+Six steps, zero manual console clicks. Terraform handles infrastructure, ArgoCD syncs K8s resources, and scripts automate Konnect setup.
 
-The stack is deployed in six layers — Terraform provisions infrastructure, ArgoCD handles K8s resources via GitOps, and Kong Konnect manages the external API gateway.
+### Deployment Layers
 
 ```mermaid
 graph TB
@@ -381,8 +383,9 @@ terraform -chdir=terraform apply
 ```
 
 This creates **everything** in one shot:
-- VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway, RAM share, CloudFront + WAF
+- VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway + RAM share
 - ArgoCD + **root application** (App of Apps) — bootstrapped automatically via the `argocd-apps` Helm chart
+- CloudFront + WAF with origin mTLS (when `enable_cloudfront = true`)
 
 ArgoCD immediately begins syncing all child apps via **sync waves** in dependency order:
 
@@ -420,7 +423,17 @@ This generates a self-signed CA + server certificate and **automatically creates
 ./scripts/02-setup-cloud-gateway.sh
 ```
 
-This creates the Konnect control plane (with `cloud_gateway: true`), provisions the Cloud Gateway network, shares the Transit Gateway via RAM, waits for the network to be ready (~30 minutes), and attaches the Transit Gateway. The TGW attachment is auto-accepted (`auto_accept_shared_attachments` is enabled).
+The script fully automates all Konnect and AWS setup:
+
+1. Creates the Konnect control plane (with `cloud_gateway: true`)
+2. Provisions the Cloud Gateway network in Kong's AWS account
+3. Creates the data plane group configuration
+4. Fetches Kong's AWS account ID and adds it as a RAM principal
+5. Waits for the network to reach `ready` state (~30 minutes)
+6. Attaches the Transit Gateway (auto-accepted via `auto_accept_shared_attachments`)
+7. Waits for the TGW attachment to complete
+
+> No AWS Console clicks required — everything is handled by the script and Terraform configuration.
 
 ### Step 6: Configure Kong Routes
 
