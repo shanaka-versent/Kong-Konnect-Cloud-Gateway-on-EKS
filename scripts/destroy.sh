@@ -11,14 +11,19 @@
 # 2. Wait for Internal NLB to be fully deprovisioned
 # 3. Delete ArgoCD applications (cascade deletes Istio components, apps)
 # 4. Cleanup Istio CRDs and remaining K8s resources
-# 5. Run terraform destroy (handles EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF)
-# 6. Cleanup orphaned CloudFront CloudFormation stacks (safety net)
-# 7. Delete Kong Cloud Gateway in Konnect via API (config, network, control plane)
+# 5. Delete Kong Cloud Gateway in Konnect via API (config, network, control plane)
+# 6. Wait for Kong's TGW attachment to detach from our Transit Gateway
+# 7. Run terraform destroy (handles EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF)
+# 8. Cleanup orphaned CloudFront CloudFormation stacks (safety net)
 #
 # WHY THIS ORDER:
-# The Istio Gateway creates an internal NLB via the AWS LB Controller.
-# If we delete EKS before the NLB is deprovisioned, the NLB and its
-# ENIs will be orphaned, blocking VPC deletion in terraform destroy.
+# - The Istio Gateway creates an internal NLB via the AWS LB Controller.
+#   If we delete EKS before the NLB is deprovisioned, the NLB and its
+#   ENIs will be orphaned, blocking VPC deletion in terraform destroy.
+# - Kong Cloud Gateway attaches its own VPC to our Transit Gateway.
+#   Terraform cannot delete the TGW while Kong's attachment exists.
+#   We must delete the Konnect network first and wait for the TGW
+#   attachment to be fully removed before running terraform destroy.
 
 set -euo pipefail
 
@@ -200,10 +205,71 @@ cleanup_k8s_resources() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 5: Terraform destroy
+# Step 6: Wait for Kong's TGW attachment to be removed
+# ---------------------------------------------------------------------------
+# After deleting the Konnect network, Kong's VPC attachment to our TGW is
+# removed asynchronously. We must wait for it to disappear before terraform
+# can delete the Transit Gateway.
+wait_for_kong_tgw_detach() {
+    log "Step 6: Waiting for Kong's TGW attachment to detach from our Transit Gateway..."
+
+    # Get our Transit Gateway ID from terraform state
+    local tgw_id
+    tgw_id=$(cd "$TERRAFORM_DIR" && terraform output -raw transit_gateway_id 2>/dev/null || true)
+
+    if [[ -z "$tgw_id" ]]; then
+        warn "  Could not determine Transit Gateway ID. Skipping TGW attachment wait."
+        return
+    fi
+
+    log "  Transit Gateway: ${tgw_id}"
+
+    # Poll for non-deleted attachments (excluding our own EKS attachment which
+    # terraform will handle). Kong's attachment comes from a different account.
+    local max_wait=300  # 5 minutes max
+    local elapsed=0
+    local interval=15
+
+    while [[ $elapsed -lt $max_wait ]]; do
+        local attachments
+        attachments=$(aws ec2 describe-transit-gateway-attachments \
+            --filters "Name=transit-gateway-id,Values=${tgw_id}" \
+            --query 'TransitGatewayAttachments[?State!=`deleted` && State!=`deleting`].TransitGatewayAttachmentId' \
+            --output text 2>/dev/null || true)
+
+        # Count non-empty attachments (our EKS one may already be gone from K8s cleanup)
+        local count=0
+        if [[ -n "$attachments" ]]; then
+            count=$(echo "$attachments" | wc -w | tr -d ' ')
+        fi
+
+        if [[ $count -eq 0 ]]; then
+            log "  All TGW attachments removed."
+            return
+        fi
+
+        # If only our own EKS attachment remains, that's fine - terraform will handle it
+        local our_attachment
+        our_attachment=$(cd "$TERRAFORM_DIR" && terraform state show 'aws_ec2_transit_gateway_vpc_attachment.eks' 2>/dev/null | grep 'id ' | awk '{print $NF}' | tr -d '"' || true)
+        if [[ $count -eq 1 && "$attachments" == "$our_attachment" ]]; then
+            log "  Only our EKS attachment remains (terraform will handle it)."
+            return
+        fi
+
+        log "  Still ${count} attachment(s) active: ${attachments}. Waiting ${interval}s... (${elapsed}s/${max_wait}s)"
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    warn "  Timed out waiting for Kong's TGW attachment to detach after ${max_wait}s."
+    warn "  Terraform destroy may fail on the Transit Gateway. If so, re-run destroy."
+}
+
+# ---------------------------------------------------------------------------
+# Step 7: Terraform destroy
 # ---------------------------------------------------------------------------
 terraform_destroy() {
-    log "Step 5: Running terraform destroy (EKS, VPC, Transit Gateway, CloudFront + WAF)..."
+    log "Step 7: Running terraform destroy (EKS, VPC, Transit Gateway, CloudFront + WAF)..."
 
     cd "$TERRAFORM_DIR"
 
@@ -223,12 +289,12 @@ terraform_destroy() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: Cleanup orphaned CloudFront CloudFormation stacks (safety net)
+# Step 8: Cleanup orphaned CloudFront CloudFormation stacks (safety net)
 # ---------------------------------------------------------------------------
 # The CloudFront distribution is deployed via CloudFormation (for origin mTLS
 # support). If terraform destroy fails to clean it up, this step removes it.
 cleanup_cloudfront_cfn_stacks() {
-    log "Step 6: Checking for orphaned CloudFront CloudFormation stacks..."
+    log "Step 8: Checking for orphaned CloudFront CloudFormation stacks..."
 
     local stack_name="kong-gw-poc-cloudfront-dist"
     local stack_status
@@ -255,18 +321,26 @@ cleanup_cloudfront_cfn_stacks() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: Delete Kong Cloud Gateway in Konnect (via API)
+# Step 5: Delete Kong Cloud Gateway in Konnect (via API)
 # ---------------------------------------------------------------------------
-# Deletion order (reverse of creation):
-#   1. Delete Cloud Gateway configuration (data plane group)
-#   2. Delete Transit Gateway attachments from the network
-#   3. Delete Cloud Gateway network
-#   4. Delete control plane
+# Deletion order:
+#   1. Delete control plane (cascades to delete configurations + data plane groups)
+#   2. Wait for data plane groups to fully terminate
+#   3. Delete Transit Gateway attachments from the network
+#   4. Delete Cloud Gateway network
+#
+# NOTE: The Konnect configurations API does not support DELETE. Deleting the
+# control plane cascades to terminate all associated data plane groups.
+# The network can only be deleted after all referencing data plane groups are gone.
+#
+# IMPORTANT: Must run BEFORE terraform destroy. Kong Cloud Gateway creates a
+# VPC attachment to our Transit Gateway. Terraform cannot delete the TGW until
+# Kong's attachment is removed, which happens when we delete the Konnect network.
 #
 # Requires KONNECT_REGION and KONNECT_TOKEN (from .env)
 # ---------------------------------------------------------------------------
 delete_konnect_resources() {
-    log "Step 7: Deleting Kong Cloud Gateway resources in Konnect..."
+    log "Step 5: Deleting Kong Cloud Gateway resources in Konnect..."
 
     if [[ -z "${KONNECT_REGION:-}" || -z "${KONNECT_TOKEN:-}" ]]; then
         warn "KONNECT_REGION or KONNECT_TOKEN not set. Skipping Konnect cleanup."
@@ -287,25 +361,50 @@ delete_konnect_resources() {
     cp_id=$(echo "$cp_list" | jq -r '.data[0].id // empty')
 
     if [[ -z "$cp_id" ]]; then
-        log "  Control plane '${CP_NAME}' not found. Nothing to delete."
-        return
+        log "  Control plane '${CP_NAME}' not found. Skipping to network cleanup."
     fi
-    log "  Found control plane: ${cp_id}"
 
-    # --- Delete Cloud Gateway configuration (data plane group) ---
-    log "  Deleting Cloud Gateway configuration..."
-    local configs
-    configs=$(curl -s "${global_api}/v2/cloud-gateways/configurations?filter%5Bcontrol_plane_id%5D=${cp_id}" \
-        -H "$auth_header")
-    local config_id
-    config_id=$(echo "$configs" | jq -r '.data[0].id // empty')
+    # --- Delete control plane (cascades to data plane groups) ---
+    if [[ -n "$cp_id" ]]; then
+        log "  Deleting control plane: ${cp_id} (cascades to data plane groups)..."
+        local cp_delete_resp
+        cp_delete_resp=$(curl -s -w "\n%{http_code}" -X DELETE \
+            "${regional_api}/v2/control-planes/${cp_id}" \
+            -H "$auth_header")
+        local cp_http_code
+        cp_http_code=$(echo "$cp_delete_resp" | tail -1)
 
-    if [[ -n "$config_id" ]]; then
-        curl -s -X DELETE "${global_api}/v2/cloud-gateways/configurations/${config_id}" \
-            -H "$auth_header" >/dev/null 2>&1 || true
-        log "  Deleted configuration: ${config_id}"
-    else
-        log "  No configuration found."
+        if [[ "$cp_http_code" == "204" || "$cp_http_code" == "200" ]]; then
+            log "  Control plane deleted."
+        else
+            warn "  Control plane deletion returned HTTP ${cp_http_code}."
+            warn "  Check: https://cloud.konghq.com → Gateway Manager"
+        fi
+
+        # Wait for data plane groups to terminate (they reference the network)
+        log "  Waiting for data plane groups to terminate..."
+        local dp_max_wait=180  # 3 minutes
+        local dp_elapsed=0
+        local dp_interval=15
+
+        while [[ $dp_elapsed -lt $dp_max_wait ]]; do
+            local dp_states
+            dp_states=$(curl -s "${global_api}/v2/cloud-gateways/configurations?filter%5Bcontrol_plane_id%5D=${cp_id}" \
+                -H "$auth_header" | jq -r '[.data[].dataplane_groups[]?.state] | join(",")' 2>/dev/null || true)
+
+            if [[ -z "$dp_states" ]]; then
+                log "  All data plane groups terminated."
+                break
+            fi
+
+            log "  Data plane group states: ${dp_states}. Waiting ${dp_interval}s... (${dp_elapsed}s/${dp_max_wait}s)"
+            sleep "$dp_interval"
+            dp_elapsed=$((dp_elapsed + dp_interval))
+        done
+
+        if [[ $dp_elapsed -ge $dp_max_wait ]]; then
+            warn "  Timed out waiting for data plane groups to terminate."
+        fi
     fi
 
     # --- Find and delete network + transit gateway attachments ---
@@ -348,30 +447,13 @@ delete_konnect_resources() {
         http_code=$(echo "$delete_resp" | tail -1)
 
         if [[ "$http_code" == "204" || "$http_code" == "200" || "$http_code" == "202" ]]; then
-            log "  Network deleted (or deletion initiated)."
+            log "  Network deletion initiated."
         else
             warn "  Network deletion returned HTTP ${http_code}. It may still be deprovisioning."
             warn "  Check: https://cloud.konghq.com → Gateway Manager → Networks"
         fi
     else
         log "  Network '${DCGW_NETWORK_NAME}' not found."
-    fi
-
-    # --- Delete control plane ---
-    log "  Deleting control plane: ${cp_id}"
-    local cp_delete_resp
-    cp_delete_resp=$(curl -s -w "\n%{http_code}" -X DELETE \
-        "${regional_api}/v2/control-planes/${cp_id}" \
-        -H "$auth_header")
-    local cp_http_code
-    cp_http_code=$(echo "$cp_delete_resp" | tail -1)
-
-    if [[ "$cp_http_code" == "204" || "$cp_http_code" == "200" ]]; then
-        log "  Control plane deleted."
-    else
-        warn "  Control plane deletion returned HTTP ${cp_http_code}."
-        warn "  It may require the network to be fully deprovisioned first."
-        warn "  Check: https://cloud.konghq.com → Gateway Manager"
     fi
 
     log "  Konnect cleanup complete."
@@ -412,9 +494,13 @@ main() {
         warn "  Then re-run terraform destroy."
     fi
 
+    # Delete Konnect resources BEFORE terraform destroy.
+    # Kong's TGW attachment must be removed before terraform can delete the TGW.
+    delete_konnect_resources
+    wait_for_kong_tgw_detach
+
     terraform_destroy
     cleanup_cloudfront_cfn_stacks
-    delete_konnect_resources
 
     echo ""
     log "Full stack teardown complete (EKS + CloudFront + WAF + Konnect)."

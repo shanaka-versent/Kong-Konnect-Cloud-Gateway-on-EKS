@@ -560,11 +560,12 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 2. **Wait for NLB/ENI cleanup** → prevents VPC deletion failures
 3. **Delete ArgoCD apps** → cascade removes Istio components and workloads
 4. **Cleanup CRDs** → removes Gateway API and Istio CRDs (finalizers)
-5. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF
-6. **Cleanup CloudFront CloudFormation stacks** → safety net for orphaned CFN stacks
-7. **Delete Konnect resources** → removes Cloud Gateway config, network, and control plane via API
+5. **Delete Konnect resources** → removes control plane, data plane groups, network via API
+6. **Wait for Kong TGW detach** → polls until Kong's VPC attachment is removed from our TGW
+7. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF
+8. **Cleanup CloudFront CloudFormation stacks** → safety net for orphaned CFN stacks
 
-> The destroy script handles everything — no manual Konnect cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
+> **Why this order?** Kong Cloud Gateway creates a VPC attachment to our Transit Gateway from their side. Terraform cannot delete the TGW while this external attachment exists. Deleting Konnect resources first (step 5-6) releases the attachment before terraform runs. The destroy script handles everything — no manual cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
 
 ---
 
