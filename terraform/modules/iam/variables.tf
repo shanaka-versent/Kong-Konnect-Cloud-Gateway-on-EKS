@@ -16,6 +16,12 @@ variable "oidc_provider_url" {
   type        = string
 }
 
+variable "enable_external_secrets" {
+  description = "Enable External Secrets Operator IRSA role"
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags for resources"
   type        = map(string)

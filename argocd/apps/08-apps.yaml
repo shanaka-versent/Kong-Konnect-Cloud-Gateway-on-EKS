@@ -1,14 +1,14 @@
-# ArgoCD App: Backend Applications
+# ArgoCD App: Platform Services (Health Responder)
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # LAYER 4: Application Deployment (ArgoCD)
 # Sync Wave: 7 (after routes)
 #
-# Deploys all backend application services:
-# - health-responder (gateway-health namespace)
-# - sample-app-1 (sample-apps namespace)
-# - sample-app-2 (sample-apps namespace)
-# - users-api (api-services namespace) with its own HTTPRoute
+# Deploys platform-level services:
+# - health-responder (gateway-health namespace) — Kong health checks
+#
+# MunchGo application services are deployed separately via munchgo-k8s-config
+# GitOps repo (see 09-munchgo-apps.yaml).
 #
 # All services use ClusterIP (no per-service NLBs).
 # Traffic reaches them via Istio Gateway HTTPRoutes.
@@ -16,7 +16,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: sample-apps
+  name: platform-apps
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "7"
@@ -27,7 +27,7 @@ spec:
 
   source:
     repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
-    targetRevision: HEAD
+    targetRevision: feature/istio-servicemesh
     path: k8s/apps
 
   destination:

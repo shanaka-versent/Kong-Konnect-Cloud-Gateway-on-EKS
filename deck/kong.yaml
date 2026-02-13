@@ -1,4 +1,4 @@
-# Kong Konnect Cloud Gateway -- Declarative Configuration (decK)
+# Kong Konnect Cloud Gateway -- MunchGo Microservices Configuration (decK)
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
 # This file defines routes, services, plugins, and consumers for the
@@ -6,12 +6,24 @@
 #
 # IMPORTANT: All services point to the SINGLE Istio Gateway internal NLB.
 # Run ./scripts/03-post-terraform-setup.sh to get the NLB DNS name.
-# Replace k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com with the actual NLB hostname.
+# Replace PLACEHOLDER_NLB_DNS with the actual NLB hostname.
 #
 # Architecture:
 #   Kong Cloud GW --[Transit GW]--> Internal NLB --> Istio Gateway --> HTTPRoute --> Pod
 #   All services share the same upstream NLB. Path-based routing is handled
 #   by both Kong (L7 plugins) and Istio Gateway (HTTPRoutes) in the cluster.
+#
+# MunchGo API Endpoints:
+#   /api/auth         → Auth Service (public — login, register, token refresh)
+#   /api/consumers    → Consumer Service (JWT protected)
+#   /api/restaurants  → Restaurant Service (GET public, POST/PUT JWT)
+#   /api/orders       → Order Service (JWT protected, CQRS)
+#   /api/couriers     → Courier Service (JWT protected)
+#   /healthz          → Health Responder (platform health check)
+#
+# JWT Authentication:
+#   Auth Service issues RS256 JWT tokens. Kong validates them using the
+#   public key. All protected endpoints require Authorization: Bearer <token>
 #
 # Apply with:
 #   deck gateway sync -s deck/kong.yaml \
@@ -34,9 +46,6 @@ _format_version: "3.0"
   # without a valid client certificate). This header adds defense-in-depth
   # at the application layer.
   #
-  # The pre-function plugin verifies the custom origin header injected by
-  # CloudFront. Requests without the correct header are rejected with 403.
-  #
   # To enable:
   # 1. Uncomment the plugin below
   # 2. Replace <YOUR_CF_ORIGIN_SECRET> with the same value used in
@@ -53,28 +62,70 @@ _format_version: "3.0"
   #         end
 
 # ==============================================================================
-# SERVICES & ROUTES
+# SERVICES & ROUTES — MunchGo Microservices
 # ==============================================================================
 # All services point to the SINGLE Istio Gateway internal NLB.
 # Kong sends traffic to this NLB with the original path preserved.
 # Istio Gateway uses HTTPRoutes to route to the correct backend pod.
 #
-# Replace k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com with the Istio Gateway NLB hostname from:
+# Replace PLACEHOLDER_NLB_DNS with the Istio Gateway NLB hostname from:
 #   kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
 #     -o jsonpath='{.status.addresses[0].value}'
 
 services:
   # --------------------------------------------------------------------------
-  # Users API -- JWT-protected REST API
+  # Auth Service — Public (login, register, token refresh)
   # --------------------------------------------------------------------------
-  - name: users-api
-    url: http://k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com:80
+  # No JWT plugin — this endpoint is public for authentication flows
+  - name: munchgo-auth
+    url: http://PLACEHOLDER_NLB_DNS:80
     protocol: http
     port: 80
     routes:
-      - name: users-api-route
+      - name: auth-route
         paths:
-          - /api/users
+          - /api/auth
+        strip_path: false
+        protocols:
+          - https
+          - http
+    plugins:
+      - name: rate-limiting
+        config:
+          minute: 60
+          policy: local
+          fault_tolerant: true
+          hide_client_headers: false
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - POST
+            - OPTIONS
+          headers:
+            - Authorization
+            - Content-Type
+          max_age: 3600
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
+
+  # --------------------------------------------------------------------------
+  # Consumer Service — JWT Protected
+  # --------------------------------------------------------------------------
+  - name: munchgo-consumers
+    url: http://PLACEHOLDER_NLB_DNS:80
+    protocol: http
+    port: 80
+    routes:
+      - name: consumers-route
+        paths:
+          - /api/consumers
         strip_path: false
         protocols:
           - https
@@ -91,61 +142,176 @@ services:
           policy: local
           fault_tolerant: true
           hide_client_headers: false
-      - name: request-transformer
-        config:
-          add:
-            headers:
-              - "X-Kong-Proxy: true"
-              - "X-Request-Source: cloud-gateway"
       - name: cors
         config:
           origins:
             - "*"
           methods:
             - GET
+            - POST
+            - PUT
+            - DELETE
             - OPTIONS
           headers:
             - Authorization
             - Content-Type
           max_age: 3600
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Tenant App 1
+  # Restaurant Service — JWT for mutations, public reads
   # --------------------------------------------------------------------------
-  - name: tenant-app1
-    url: http://k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com:80
+  - name: munchgo-restaurants
+    url: http://PLACEHOLDER_NLB_DNS:80
     protocol: http
     port: 80
     routes:
-      - name: app1-route
+      - name: restaurants-route
         paths:
-          - /app1
+          - /api/restaurants
         strip_path: false
         protocols:
           - https
           - http
+    plugins:
+      - name: jwt
+        config:
+          key_claim_name: iss
+          claims_to_verify:
+            - exp
+      - name: rate-limiting
+        config:
+          minute: 200
+          policy: local
+          fault_tolerant: true
+          hide_client_headers: false
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+          headers:
+            - Authorization
+            - Content-Type
+          max_age: 3600
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Tenant App 2
+  # Order Service — JWT Protected (CQRS)
   # --------------------------------------------------------------------------
-  - name: tenant-app2
-    url: http://k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com:80
+  - name: munchgo-orders
+    url: http://PLACEHOLDER_NLB_DNS:80
     protocol: http
     port: 80
     routes:
-      - name: app2-route
+      - name: orders-route
         paths:
-          - /app2
+          - /api/orders
         strip_path: false
         protocols:
           - https
           - http
+    plugins:
+      - name: jwt
+        config:
+          key_claim_name: iss
+          claims_to_verify:
+            - exp
+      - name: rate-limiting
+        config:
+          minute: 100
+          policy: local
+          fault_tolerant: true
+          hide_client_headers: false
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+          headers:
+            - Authorization
+            - Content-Type
+          max_age: 3600
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Health Check
+  # Courier Service — JWT Protected
+  # --------------------------------------------------------------------------
+  - name: munchgo-couriers
+    url: http://PLACEHOLDER_NLB_DNS:80
+    protocol: http
+    port: 80
+    routes:
+      - name: couriers-route
+        paths:
+          - /api/couriers
+        strip_path: false
+        protocols:
+          - https
+          - http
+    plugins:
+      - name: jwt
+        config:
+          key_claim_name: iss
+          claims_to_verify:
+            - exp
+      - name: rate-limiting
+        config:
+          minute: 100
+          policy: local
+          fault_tolerant: true
+          hide_client_headers: false
+      - name: cors
+        config:
+          origins:
+            - "*"
+          methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+          headers:
+            - Authorization
+            - Content-Type
+          max_age: 3600
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "X-Kong-Proxy: true"
+              - "X-Request-Source: cloud-gateway"
+
+  # --------------------------------------------------------------------------
+  # Health Check — Platform health endpoint
   # --------------------------------------------------------------------------
   - name: gateway-health
-    url: http://k8s-istioing-kongclou-55513b211e-fc070bf2e990336d.elb.ap-southeast-2.amazonaws.com:80
+    url: http://PLACEHOLDER_NLB_DNS:80
     protocol: http
     port: 80
     routes:
@@ -160,10 +326,24 @@ services:
 # ==============================================================================
 # CONSUMERS & CREDENTIALS
 # ==============================================================================
+# Kong validates JWT tokens issued by the MunchGo Auth Service.
+# Auth Service signs tokens with RS256 (RSA private key).
+# Kong validates tokens using the corresponding RSA public key.
+#
+# After deploying auth-service, extract the RSA public key:
+#   kubectl exec -n munchgo deployment/munchgo-auth-service -- \
+#     cat /app/keys/public.pem
+#
+# Then update the rsa_public_key below and re-sync:
+#   deck gateway sync -s deck/kong.yaml ...
 
 consumers:
-  - username: demo-user
+  - username: munchgo-app
     jwt_secrets:
-      - key: demo-issuer
-        secret: demo-secret-key-do-not-use-in-production
-        algorithm: HS256
+      - key: munchgo-auth-service
+        algorithm: RS256
+        rsa_public_key: |
+          -----BEGIN PUBLIC KEY-----
+          PLACEHOLDER_RSA_PUBLIC_KEY
+          Replace this with the actual RSA public key from auth-service
+          -----END PUBLIC KEY-----

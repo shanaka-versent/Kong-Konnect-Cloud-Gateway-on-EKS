@@ -3,6 +3,7 @@
 #
 # Creates IAM roles for:
 # - AWS Load Balancer Controller (IRSA)
+# - External Secrets Operator (IRSA) - for MunchGo secrets from AWS Secrets Manager
 #
 # Note: EKS Cluster and Node IAM roles are managed in the EKS module.
 # This module focuses on additional IRSA roles for cluster add-ons.
@@ -291,4 +292,70 @@ resource "aws_iam_role" "lb_controller" {
 resource "aws_iam_role_policy_attachment" "lb_controller" {
   policy_arn = aws_iam_policy.lb_controller.arn
   role       = aws_iam_role.lb_controller.name
+}
+
+# ==============================================================================
+# EXTERNAL SECRETS OPERATOR IRSA ROLE
+# ==============================================================================
+# Allows the External Secrets Operator to read secrets from AWS Secrets Manager.
+# Used by MunchGo microservices to fetch DB credentials, Kafka bootstrap servers, etc.
+
+resource "aws_iam_policy" "external_secrets" {
+  count       = var.enable_external_secrets ? 1 : 0
+  name        = "policy-external-secrets-${var.name_prefix}"
+  description = "IAM policy for External Secrets Operator - read from Secrets Manager"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecretVersionIds"
+        ]
+        Resource = "arn:aws:secretsmanager:*:*:secret:${var.name_prefix}-munchgo-*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:ListSecrets"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role" "external_secrets" {
+  count = var.enable_external_secrets ? 1 : 0
+  name  = "role-external-secrets-${var.name_prefix}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Effect = "Allow"
+      Principal = {
+        Federated = var.oidc_provider_arn
+      }
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider_url}:sub" = "system:serviceaccount:external-secrets:external-secrets"
+          "${var.oidc_provider_url}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "external_secrets" {
+  count      = var.enable_external_secrets ? 1 : 0
+  policy_arn = aws_iam_policy.external_secrets[0].arn
+  role       = aws_iam_role.external_secrets[0].name
 }

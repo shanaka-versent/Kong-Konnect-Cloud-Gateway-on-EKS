@@ -106,10 +106,11 @@ module "eks" {
 module "iam" {
   source = "./modules/iam"
 
-  name_prefix       = local.name_prefix
-  oidc_provider_arn = module.eks.oidc_provider_arn
-  oidc_provider_url = module.eks.oidc_provider_url
-  tags              = var.tags
+  name_prefix              = local.name_prefix
+  oidc_provider_arn        = module.eks.oidc_provider_arn
+  oidc_provider_url        = module.eks.oidc_provider_url
+  enable_external_secrets  = var.enable_external_secrets
+  tags                     = var.tags
 }
 
 # AWS Load Balancer Controller - Creates the internal NLB for Istio Gateway
@@ -221,6 +222,65 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 }
 
 # ==============================================================================
+# LAYER 1 ADDITIONS: MUNCHGO DATA INFRASTRUCTURE
+# ==============================================================================
+# These resources support the MunchGo microservices platform:
+# - ECR: Container image repositories (CI pushes here, ArgoCD deploys from here)
+# - MSK: Kafka event messaging (Transactional Outbox, Saga orchestration)
+# - RDS: PostgreSQL databases (one instance, 6 databases)
+# - SPA: S3 bucket for React frontend (served via CloudFront)
+
+# ECR Repositories - one per MunchGo microservice
+module "ecr" {
+  count  = var.enable_ecr ? 1 : 0
+  source = "./modules/ecr"
+
+  name_prefix = local.name_prefix
+  tags        = var.tags
+}
+
+# Amazon MSK - Kafka for event-driven microservice communication
+module "msk" {
+  count  = var.enable_msk ? 1 : 0
+  source = "./modules/msk"
+
+  name_prefix                = local.name_prefix
+  vpc_id                     = module.vpc.vpc_id
+  private_subnet_ids         = module.vpc.private_subnet_ids
+  eks_node_security_group_id = module.eks.cluster_security_group_id
+  instance_type              = var.msk_instance_type
+  broker_count               = var.msk_broker_count
+  ebs_volume_size            = var.msk_ebs_volume_size
+  enable_cloudwatch_logs     = true
+  tags                       = var.tags
+}
+
+# Amazon RDS PostgreSQL - shared instance with per-service databases
+module "rds" {
+  count  = var.enable_rds ? 1 : 0
+  source = "./modules/rds"
+
+  name_prefix                = local.name_prefix
+  vpc_id                     = module.vpc.vpc_id
+  private_subnet_ids         = module.vpc.private_subnet_ids
+  eks_node_security_group_id = module.eks.cluster_security_group_id
+  instance_class             = var.rds_instance_class
+  allocated_storage          = var.rds_allocated_storage
+  multi_az                   = var.rds_multi_az
+  tags                       = var.tags
+}
+
+# S3 SPA Bucket - MunchGo React frontend (served via CloudFront OAC)
+module "spa" {
+  count  = var.enable_spa ? 1 : 0
+  source = "./modules/spa"
+
+  name_prefix                = local.name_prefix
+  cloudfront_distribution_arn = var.enable_cloudfront && var.kong_cloud_gateway_domain != "" ? module.cloudfront[0].distribution_arn : ""
+  tags                       = var.tags
+}
+
+# ==============================================================================
 # LAYER 6: EDGE SECURITY -- CloudFront + WAF
 # ==============================================================================
 # CloudFront + WAF sits in front of Kong's Cloud Gateway proxy URL.
@@ -282,6 +342,11 @@ module "cloudfront" {
 
   # CloudFront
   price_class = var.cloudfront_price_class
+
+  # S3 SPA Origin (MunchGo React frontend)
+  enable_s3_origin                = var.enable_spa
+  s3_bucket_regional_domain_name = var.enable_spa ? module.spa[0].bucket_regional_domain_name : ""
+  s3_bucket_arn                  = var.enable_spa ? module.spa[0].bucket_arn : ""
 
   tags = var.tags
 }

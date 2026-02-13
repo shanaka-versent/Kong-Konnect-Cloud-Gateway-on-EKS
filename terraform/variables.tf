@@ -116,6 +116,81 @@ variable "enable_logging" {
 }
 
 # ==============================================================================
+# MUNCHGO DATA INFRASTRUCTURE
+# ==============================================================================
+
+# ECR - Container image repositories
+variable "enable_ecr" {
+  description = "Enable ECR repositories for MunchGo microservices"
+  type        = bool
+  default     = true
+}
+
+# MSK - Kafka event messaging
+variable "enable_msk" {
+  description = "Enable Amazon MSK for MunchGo event-driven messaging"
+  type        = bool
+  default     = true
+}
+
+variable "msk_instance_type" {
+  description = "MSK broker instance type"
+  type        = string
+  default     = "kafka.m5.large"
+}
+
+variable "msk_broker_count" {
+  description = "Number of MSK broker nodes"
+  type        = number
+  default     = 2
+}
+
+variable "msk_ebs_volume_size" {
+  description = "MSK EBS volume size per broker (GB)"
+  type        = number
+  default     = 100
+}
+
+# RDS PostgreSQL - shared instance with 6 databases
+variable "enable_rds" {
+  description = "Enable RDS PostgreSQL for MunchGo microservice databases"
+  type        = bool
+  default     = true
+}
+
+variable "rds_instance_class" {
+  description = "RDS instance class"
+  type        = string
+  default     = "db.t3.medium"
+}
+
+variable "rds_allocated_storage" {
+  description = "RDS initial allocated storage (GB)"
+  type        = number
+  default     = 20
+}
+
+variable "rds_multi_az" {
+  description = "Enable RDS Multi-AZ deployment"
+  type        = bool
+  default     = false
+}
+
+# S3 SPA - React frontend hosting
+variable "enable_spa" {
+  description = "Enable S3 bucket for MunchGo React SPA hosting via CloudFront"
+  type        = bool
+  default     = true
+}
+
+# External Secrets Operator
+variable "enable_external_secrets" {
+  description = "Enable External Secrets Operator IRSA role for Secrets Manager access"
+  type        = bool
+  default     = true
+}
+
+# ==============================================================================
 # CLOUDFRONT + WAF (Edge Security Layer)
 # ==============================================================================
 # CloudFront + WAF sits in front of Kong Cloud Gateway's public proxy URL.

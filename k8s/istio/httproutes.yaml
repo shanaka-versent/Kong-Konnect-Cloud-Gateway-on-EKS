@@ -1,11 +1,21 @@
-# Kong Cloud Gateway on EKS - HTTPRoutes for Kubernetes Gateway API
+# Kong Cloud Gateway on EKS - HTTPRoutes for MunchGo Microservices
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# These route traffic from the Istio Gateway to backend services.
+# These route traffic from the Istio Gateway to MunchGo backend services.
 # Kong Cloud Gateway sends traffic to the single Istio Gateway NLB,
 # which then uses these HTTPRoutes for path-based routing to pods.
 #
 # IMPORTANT: This uses HTTPRoute (Gateway API), NOT Ingress resources
+#
+# API Routes:
+#   /healthz          → health-responder     (gateway-health namespace)
+#   /api/auth/*       → munchgo-auth-service (munchgo namespace) — public
+#   /api/consumers/*  → munchgo-consumer-service                  — JWT protected
+#   /api/restaurants/*→ munchgo-restaurant-service                — GET public, POST/PUT JWT
+#   /api/orders/*     → munchgo-order-service                     — JWT protected
+#   /api/couriers/*   → munchgo-courier-service                   — JWT protected
+#
+# Note: JWT authentication is handled at Kong API Gateway level (not here)
 
 ---
 # Health Route - handles /healthz paths
@@ -29,12 +39,12 @@ spec:
           port: 80
 
 ---
-# App 1 Route - handles /app1 paths
+# Auth Service Route - /api/auth (public — login, register, token refresh)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: app1-route
-  namespace: sample-apps
+  name: auth-route
+  namespace: munchgo
 spec:
   parentRefs:
     - name: kong-cloud-gw-gateway
@@ -43,18 +53,18 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /app1
+            value: /api/auth
       backendRefs:
-        - name: sample-app-1
-          port: 80
+        - name: munchgo-auth-service
+          port: 8080
 
 ---
-# App 2 Route - handles /app2 paths
+# Consumer Service Route - /api/consumers (JWT protected)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: app2-route
-  namespace: sample-apps
+  name: consumers-route
+  namespace: munchgo
 spec:
   parentRefs:
     - name: kong-cloud-gw-gateway
@@ -63,10 +73,70 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /app2
+            value: /api/consumers
       backendRefs:
-        - name: sample-app-2
-          port: 80
+        - name: munchgo-consumer-service
+          port: 8080
+
+---
+# Restaurant Service Route - /api/restaurants (GET public, POST/PUT JWT)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: restaurants-route
+  namespace: munchgo
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/restaurants
+      backendRefs:
+        - name: munchgo-restaurant-service
+          port: 8080
+
+---
+# Order Service Route - /api/orders (JWT protected, CQRS)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: orders-route
+  namespace: munchgo
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/orders
+      backendRefs:
+        - name: munchgo-order-service
+          port: 8080
+
+---
+# Courier Service Route - /api/couriers (JWT protected)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: couriers-route
+  namespace: munchgo
+spec:
+  parentRefs:
+    - name: kong-cloud-gw-gateway
+      namespace: istio-ingress
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/couriers
+      backendRefs:
+        - name: munchgo-courier-service
+          port: 8080
 
 ---
 # ReferenceGrants - allow HTTPRoutes to reference services across namespaces
@@ -89,13 +159,13 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:
-  name: allow-sample-apps
-  namespace: sample-apps
+  name: allow-munchgo
+  namespace: munchgo
 spec:
   from:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
-      namespace: sample-apps
+      namespace: munchgo
   to:
     - group: ""
       kind: Service

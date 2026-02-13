@@ -96,6 +96,61 @@ output "application_url" {
 }
 
 # ==============================================================================
+# MUNCHGO DATA INFRASTRUCTURE OUTPUTS
+# ==============================================================================
+
+# ECR
+output "ecr_repository_urls" {
+  description = "Map of MunchGo service name to ECR repository URL"
+  value       = var.enable_ecr ? module.ecr[0].repository_urls : {}
+}
+
+# MSK
+output "msk_bootstrap_brokers" {
+  description = "MSK plaintext bootstrap broker connection string"
+  value       = var.enable_msk ? module.msk[0].bootstrap_brokers : null
+}
+
+output "msk_bootstrap_brokers_tls" {
+  description = "MSK TLS bootstrap broker connection string"
+  value       = var.enable_msk ? module.msk[0].bootstrap_brokers_tls : null
+}
+
+output "msk_zookeeper_connect" {
+  description = "MSK ZooKeeper connection string"
+  value       = var.enable_msk ? module.msk[0].zookeeper_connect_string : null
+}
+
+# RDS
+output "rds_endpoint" {
+  description = "RDS PostgreSQL endpoint"
+  value       = var.enable_rds ? module.rds[0].endpoint : null
+}
+
+output "rds_master_secret_arn" {
+  description = "RDS master credentials Secrets Manager ARN"
+  value       = var.enable_rds ? module.rds[0].master_secret_arn : null
+  sensitive   = true
+}
+
+# S3 SPA
+output "spa_bucket_name" {
+  description = "S3 SPA bucket name"
+  value       = var.enable_spa ? module.spa[0].bucket_id : null
+}
+
+output "spa_bucket_domain" {
+  description = "S3 SPA bucket regional domain name"
+  value       = var.enable_spa ? module.spa[0].bucket_regional_domain_name : null
+}
+
+# External Secrets
+output "external_secrets_role_arn" {
+  description = "External Secrets Operator IRSA role ARN"
+  value       = var.enable_external_secrets ? module.iam.external_secrets_role_arn : null
+}
+
+# ==============================================================================
 # KONG CLOUD GATEWAY SETUP
 # ==============================================================================
 

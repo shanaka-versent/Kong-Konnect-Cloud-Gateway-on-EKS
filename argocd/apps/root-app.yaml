@@ -13,11 +13,15 @@
 #   - Istio Ambient Mesh (base, istiod, cni, ztunnel)
 #   - Namespaces with ambient labels
 #   - Istio Gateway and HTTPRoutes
+#   - External Secrets Operator
+#   - Istio mesh policies (waypoint, AuthZ, PeerAuth, telemetry)
+#   - Observability stack (Prometheus, Grafana, Kiali, Jaeger)
 #
 # Layer 4: Application Deployment
-#   - Sample Applications (app1, app2)
-#   - Users API (JWT-protected via Kong)
-#   - Health Responder
+#   - Health Responder (platform service)
+#   - MunchGo Microservices (via munchgo-k8s-config GitOps repo)
+#     - Auth Service, Consumer Service, Restaurant Service
+#     - Courier Service, Order Service, Saga Orchestrator
 #
 # Kong Cloud Gateway runs externally in Kong's managed infrastructure.
 # It connects to the single Istio Gateway NLB via Transit Gateway.
@@ -34,7 +38,7 @@ spec:
 
   source:
     repoURL: https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS.git
-    targetRevision: HEAD
+    targetRevision: feature/istio-servicemesh
     path: argocd/apps
 
   destination:
