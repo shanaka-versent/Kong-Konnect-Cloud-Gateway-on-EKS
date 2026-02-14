@@ -482,7 +482,7 @@ graph LR
 │   ├── 07-httproutes.yaml          #   Wave  6: HTTPRoutes for MunchGo APIs
 │   ├── 08-apps.yaml                #   Wave  7: Platform apps (health-responder)
 │   ├── 09-external-secrets.yaml    #   Wave  8: External Secrets Operator (Helm)
-│   ├── 09-munchgo-apps.yaml        #   Wave  8: MunchGo services (from GitOps repo)
+│   ├── 09-munchgo-apps.yaml        #   Wave  8: Layer 3→4 bridge (munchgo-k8s-config repo)
 │   ├── 09-external-secrets-config.yaml # Wave 9: ClusterSecretStore + ExternalSecrets
 │   ├── 10-istio-mesh-policies.yaml #   Wave 10: Waypoint, AuthZ, PeerAuth, Telemetry
 │   ├── 11-prometheus.yaml          #   Wave 11: Prometheus + Grafana
@@ -697,18 +697,19 @@ graph TB
         SPA[S3 SPA Bucket]
     end
 
-    subgraph L3 ["Layer 3: Service Mesh — ArgoCD"]
+    subgraph L3 ["Layer 3: EKS Customizations — ArgoCD (this repo)"]
         CRDs2[Gateway API CRDs]
         Istio2[Istio Ambient<br/>base · istiod · cni · ztunnel]
         GW3[Istio Gateway<br/>Single Internal NLB]
         Routes2[HTTPRoutes + ReferenceGrants]
         ESO[External Secrets Operator]
         MeshPol[Mesh Policies<br/>Waypoint · AuthZ · mTLS]
+        HealthApp[health-responder]
+        BRIDGE[09-munchgo-apps<br/>Layer 3→4 Bridge]
     end
 
-    subgraph L4 ["Layer 4: Applications — ArgoCD"]
-        MunchGoApps[MunchGo Services<br/>via munchgo-k8s-config GitOps]
-        HealthApp[health-responder]
+    subgraph L4 ["Layer 4: Applications — ArgoCD (munchgo-k8s-config repo)"]
+        MunchGoApps[MunchGo Services<br/>6 ArgoCD Apps · Kustomize overlays<br/>CI auto-updates image tags]
     end
 
     subgraph L5 ["Layer 5: API Config — Kong Konnect"]
@@ -724,7 +725,8 @@ graph TB
     CRDs2 --> Istio2
     Istio2 --> GW3
     GW3 --> Routes2
-    Routes2 --> MunchGoApps
+    Routes2 --> BRIDGE
+    BRIDGE -->|discovers 6 service Apps| MunchGoApps
     MunchGoApps -.->|Transit GW| KongGW2
     KongGW2 -.-> CFront2
 
@@ -759,12 +761,12 @@ terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-This creates Layers 1-4 in one shot:
+This creates Layers 1-3 in one shot:
 - VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway + RAM share
 - **ECR** (6 repositories), **MSK** (Kafka), **RDS** (PostgreSQL + 6 databases), **S3** (SPA bucket)
 - ArgoCD + **root application** (App of Apps) — bootstrapped automatically
 
-ArgoCD immediately begins syncing all child apps via **sync waves** in dependency order (see table above).
+ArgoCD immediately begins syncing all Layer 3 child apps via **sync waves** in dependency order (see table above). The `09-munchgo-apps.yaml` bridge app (sync wave 8) discovers Layer 4 service Applications from the `munchgo-k8s-config` GitOps repo.
 
 > CloudFront + WAF (Layer 6) is deployed in Step 7 after the Kong proxy URL is available.
 
