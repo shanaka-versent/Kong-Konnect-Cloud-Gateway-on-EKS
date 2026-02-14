@@ -106,11 +106,12 @@ module "eks" {
 module "iam" {
   source = "./modules/iam"
 
-  name_prefix              = local.name_prefix
-  oidc_provider_arn        = module.eks.oidc_provider_arn
-  oidc_provider_url        = module.eks.oidc_provider_url
-  enable_external_secrets  = var.enable_external_secrets
-  tags                     = var.tags
+  name_prefix             = local.name_prefix
+  oidc_provider_arn       = module.eks.oidc_provider_arn
+  oidc_provider_url       = module.eks.oidc_provider_url
+  enable_external_secrets = var.enable_external_secrets
+  enable_cognito          = var.enable_cognito
+  tags                    = var.tags
 }
 
 # AWS Load Balancer Controller - Creates the internal NLB for Istio Gateway
@@ -278,6 +279,20 @@ module "spa" {
   name_prefix                = local.name_prefix
   cloudfront_distribution_arn = var.enable_cloudfront && var.kong_cloud_gateway_domain != "" ? module.cloudfront[0].distribution_arn : ""
   tags                       = var.tags
+}
+
+# Amazon Cognito - User authentication (replaces custom JWT implementation)
+module "cognito" {
+  count  = var.enable_cognito ? 1 : 0
+  source = "./modules/cognito"
+
+  name_prefix         = local.name_prefix
+  region              = var.region
+  callback_urls       = var.cognito_callback_urls
+  logout_urls         = var.cognito_logout_urls
+  enable_mfa          = var.cognito_enable_mfa
+  deletion_protection = var.cognito_deletion_protection
+  tags                = var.tags
 }
 
 # ==============================================================================

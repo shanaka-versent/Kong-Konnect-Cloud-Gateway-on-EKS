@@ -1,7 +1,7 @@
 # Kong Konnect Cloud Gateway -- MunchGo Microservices Configuration (decK)
 # @author Shanaka Jayasundera - shanakaj@gmail.com
 #
-# This file defines routes, services, plugins, and consumers for the
+# This file defines routes, services, and plugins for the
 # Kong Dedicated Cloud Gateway managed by Konnect.
 #
 # IMPORTANT: All services point to the SINGLE Istio Gateway internal NLB.
@@ -15,15 +15,20 @@
 #
 # MunchGo API Endpoints:
 #   /api/auth         → Auth Service (public — login, register, token refresh)
-#   /api/consumers    → Consumer Service (JWT protected)
-#   /api/restaurants  → Restaurant Service (GET public, POST/PUT JWT)
-#   /api/orders       → Order Service (JWT protected, CQRS)
-#   /api/couriers     → Courier Service (JWT protected)
+#   /api/consumers    → Consumer Service (Cognito OIDC protected)
+#   /api/restaurants  → Restaurant Service (Cognito OIDC protected)
+#   /api/orders       → Order Service (Cognito OIDC protected, CQRS)
+#   /api/couriers     → Courier Service (Cognito OIDC protected)
 #   /healthz          → Health Responder (platform health check)
 #
-# JWT Authentication:
-#   Auth Service issues RS256 JWT tokens. Kong validates them using the
-#   public key. All protected endpoints require Authorization: Bearer <token>
+# Authentication (Amazon Cognito + Kong OpenID Connect):
+#   Auth Service registers users in Cognito and returns Cognito tokens.
+#   Kong validates Cognito JWTs via the openid-connect plugin using
+#   JWKS auto-discovery (automatic key rotation, no manual key updates).
+#   Validated user claims are forwarded as upstream headers.
+#
+# After Cognito Terraform apply, update PLACEHOLDER_COGNITO_ISSUER_URL with:
+#   terraform output cognito_issuer_url
 #
 # Apply with:
 #   deck gateway sync -s deck/kong.yaml \
@@ -76,7 +81,9 @@ services:
   # --------------------------------------------------------------------------
   # Auth Service — Public (login, register, token refresh)
   # --------------------------------------------------------------------------
-  # No JWT plugin — this endpoint is public for authentication flows
+  # No OIDC plugin — this endpoint is public for authentication flows.
+  # Auth service proxies to Cognito for user registration and login,
+  # then returns Cognito tokens to the client.
   - name: munchgo-auth
     url: http://PLACEHOLDER_NLB_DNS:80
     protocol: http
@@ -116,7 +123,7 @@ services:
               - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Consumer Service — JWT Protected
+  # Consumer Service — Cognito OIDC Protected
   # --------------------------------------------------------------------------
   - name: munchgo-consumers
     url: http://PLACEHOLDER_NLB_DNS:80
@@ -131,11 +138,22 @@ services:
           - https
           - http
     plugins:
-      - name: jwt
+      - name: openid-connect
         config:
-          key_claim_name: iss
-          claims_to_verify:
-            - exp
+          issuer: PLACEHOLDER_COGNITO_ISSUER_URL/.well-known/openid-configuration
+          auth_methods:
+            - bearer
+          bearer_token_param_type:
+            - header
+          cache_ttl: 300
+          upstream_headers_claims:
+            - sub
+            - email
+            - custom:roles
+          upstream_headers_names:
+            - X-User-Sub
+            - X-User-Email
+            - X-User-Roles
       - name: rate-limiting
         config:
           minute: 100
@@ -164,7 +182,7 @@ services:
               - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Restaurant Service — JWT for mutations, public reads
+  # Restaurant Service — Cognito OIDC Protected
   # --------------------------------------------------------------------------
   - name: munchgo-restaurants
     url: http://PLACEHOLDER_NLB_DNS:80
@@ -179,11 +197,22 @@ services:
           - https
           - http
     plugins:
-      - name: jwt
+      - name: openid-connect
         config:
-          key_claim_name: iss
-          claims_to_verify:
-            - exp
+          issuer: PLACEHOLDER_COGNITO_ISSUER_URL/.well-known/openid-configuration
+          auth_methods:
+            - bearer
+          bearer_token_param_type:
+            - header
+          cache_ttl: 300
+          upstream_headers_claims:
+            - sub
+            - email
+            - custom:roles
+          upstream_headers_names:
+            - X-User-Sub
+            - X-User-Email
+            - X-User-Roles
       - name: rate-limiting
         config:
           minute: 200
@@ -212,7 +241,7 @@ services:
               - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Order Service — JWT Protected (CQRS)
+  # Order Service — Cognito OIDC Protected (CQRS)
   # --------------------------------------------------------------------------
   - name: munchgo-orders
     url: http://PLACEHOLDER_NLB_DNS:80
@@ -227,11 +256,22 @@ services:
           - https
           - http
     plugins:
-      - name: jwt
+      - name: openid-connect
         config:
-          key_claim_name: iss
-          claims_to_verify:
-            - exp
+          issuer: PLACEHOLDER_COGNITO_ISSUER_URL/.well-known/openid-configuration
+          auth_methods:
+            - bearer
+          bearer_token_param_type:
+            - header
+          cache_ttl: 300
+          upstream_headers_claims:
+            - sub
+            - email
+            - custom:roles
+          upstream_headers_names:
+            - X-User-Sub
+            - X-User-Email
+            - X-User-Roles
       - name: rate-limiting
         config:
           minute: 100
@@ -260,7 +300,7 @@ services:
               - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Courier Service — JWT Protected
+  # Courier Service — Cognito OIDC Protected
   # --------------------------------------------------------------------------
   - name: munchgo-couriers
     url: http://PLACEHOLDER_NLB_DNS:80
@@ -275,11 +315,22 @@ services:
           - https
           - http
     plugins:
-      - name: jwt
+      - name: openid-connect
         config:
-          key_claim_name: iss
-          claims_to_verify:
-            - exp
+          issuer: PLACEHOLDER_COGNITO_ISSUER_URL/.well-known/openid-configuration
+          auth_methods:
+            - bearer
+          bearer_token_param_type:
+            - header
+          cache_ttl: 300
+          upstream_headers_claims:
+            - sub
+            - email
+            - custom:roles
+          upstream_headers_names:
+            - X-User-Sub
+            - X-User-Email
+            - X-User-Roles
       - name: rate-limiting
         config:
           minute: 100
@@ -324,26 +375,14 @@ services:
           - http
 
 # ==============================================================================
-# CONSUMERS & CREDENTIALS
+# NOTE: No consumers section needed.
 # ==============================================================================
-# Kong validates JWT tokens issued by the MunchGo Auth Service.
-# Auth Service signs tokens with RS256 (RSA private key).
-# Kong validates tokens using the corresponding RSA public key.
+# With the openid-connect plugin, Kong auto-discovers Cognito's JWKS endpoint
+# for token signature verification. No manual RSA public key management.
+# Cognito handles key rotation automatically.
 #
-# After deploying auth-service, extract the RSA public key:
-#   kubectl exec -n munchgo deployment/munchgo-auth-service -- \
-#     cat /app/keys/public.pem
+# After Cognito Terraform apply, update the issuer URLs above:
+#   PLACEHOLDER_COGNITO_ISSUER_URL → https://cognito-idp.<region>.amazonaws.com/<user-pool-id>
 #
-# Then update the rsa_public_key below and re-sync:
-#   deck gateway sync -s deck/kong.yaml ...
-
-consumers:
-  - username: munchgo-app
-    jwt_secrets:
-      - key: munchgo-auth-service
-        algorithm: RS256
-        rsa_public_key: |
-          -----BEGIN PUBLIC KEY-----
-          PLACEHOLDER_RSA_PUBLIC_KEY
-          Replace this with the actual RSA public key from auth-service
-          -----END PUBLIC KEY-----
+# Get the value from:
+#   terraform output cognito_issuer_url

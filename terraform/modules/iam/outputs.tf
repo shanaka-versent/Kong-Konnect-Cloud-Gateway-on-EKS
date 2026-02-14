@@ -15,3 +15,8 @@ output "external_secrets_role_arn" {
   description = "External Secrets Operator IAM role ARN (for IRSA)"
   value       = var.enable_external_secrets ? aws_iam_role.external_secrets[0].arn : ""
 }
+
+output "cognito_auth_service_role_arn" {
+  description = "Cognito auth-service IAM role ARN (for IRSA)"
+  value       = var.enable_cognito ? aws_iam_role.cognito_auth_service[0].arn : ""
+}

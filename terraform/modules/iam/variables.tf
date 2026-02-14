@@ -22,6 +22,12 @@ variable "enable_external_secrets" {
   default     = true
 }
 
+variable "enable_cognito" {
+  description = "Enable Cognito auth-service IRSA role"
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags for resources"
   type        = map(string)

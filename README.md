@@ -1,6 +1,6 @@
 # Kong Dedicated Cloud Gateway on EKS — MunchGo Microservices Platform
 
-Kong Konnect Dedicated Cloud Gateway with **MunchGo microservices** on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT RS256 auth, rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. L7 observability via **waypoint proxies**.
+Kong Konnect Dedicated Cloud Gateway with **MunchGo microservices** on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with **Amazon Cognito** authentication (OpenID Connect), rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. L7 observability via **waypoint proxies**.
 
 **CloudFront + WAF** is mandatory — Kong Cloud Gateway has a public-facing NLB that must be protected. All client traffic passes through CloudFront for WAF inspection (DDoS, SQLi/XSS, rate limiting, geo-blocking) before reaching Kong. Origin mTLS prevents direct access to Kong Cloud Gateway, ensuring nobody can bypass WAF.
 
@@ -14,7 +14,7 @@ The entire stack deploys with **zero manual steps** — Terraform provisions inf
   - [Istio Ambient Service Mesh](#istio-ambient-service-mesh)
   - [East-West Traffic](#east-west-traffic--how-services-communicate)
 - [MunchGo Microservices](#munchgo-microservices)
-  - [Authentication & JWT Flow](#authentication--jwt-flow)
+  - [Authentication — Amazon Cognito + OIDC](#authentication--amazon-cognito--oidc)
   - [Order Saga Flow](#order-saga-flow)
 - [Repository Structure](#repository-structure)
 - [GitOps Pipeline](#gitops-pipeline)
@@ -40,7 +40,7 @@ graph TB
     CF[CloudFront + WAF<br/>Edge Security + Origin mTLS]
 
     subgraph kong_acct ["Kong's AWS Account (192.168.0.0/16)"]
-        Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>JWT RS256 · Rate Limit · CORS · Analytics]
+        Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>OIDC (Cognito) · Rate Limit · CORS · Analytics]
     end
 
     TGW{{AWS Transit Gateway<br/>Private AWS Backbone}}
@@ -52,7 +52,7 @@ graph TB
                 IGW[Istio Gateway<br/>K8s Gateway API]
             end
             subgraph ns_munchgo [munchgo namespace — Istio Ambient + Waypoint]
-                AUTH[auth-service<br/>JWT issuer]
+                AUTH[auth-service<br/>Cognito facade]
                 CONSUMER[consumer-service]
                 RESTAURANT[restaurant-service]
                 ORDER[order-service<br/>CQRS + Events]
@@ -64,6 +64,7 @@ graph TB
             end
         end
         subgraph data_services [Managed AWS Data Services]
+            COGNITO[Amazon Cognito<br/>User Pool + OIDC]
             MSK[Amazon MSK<br/>Kafka 3.6.0]
             RDS[(Amazon RDS<br/>PostgreSQL 16<br/>6 Databases)]
             ECR[Amazon ECR<br/>6 Repositories]
@@ -82,6 +83,7 @@ graph TB
     IGW -->|HTTPRoute /api/orders| ORDER
     IGW -->|HTTPRoute /api/couriers| COURIER
 
+    AUTH -.->|Cognito Admin API| COGNITO
     AUTH -.->|Kafka Events| MSK
     ORDER -.->|Kafka Events| MSK
     SAGA -.->|Kafka Orchestration| MSK
@@ -100,6 +102,7 @@ graph TB
     style MSK fill:#FF9900,color:#fff
     style RDS fill:#3B48CC,color:#fff
     style ECR fill:#FF9900,color:#fff
+    style COGNITO fill:#DD344C,color:#fff
     style S3 fill:#3F8624,color:#fff
     style AUTH fill:#2E8B57,color:#fff
     style CONSUMER fill:#2E8B57,color:#fff
@@ -163,7 +166,7 @@ sequenceDiagram
 
     Note over CF,K: TLS Session 2 (Origin mTLS)
     CF->>+K: HTTPS + Client mTLS
-    K->>K: JWT RS256 Validation<br/>Rate Limiting · CORS
+    K->>K: OIDC Token Validation (Cognito JWKS)<br/>Rate Limiting · CORS
 
     Note over K,IG: TLS Session 3 (Backend)
     K->>+TGW: HTTPS via Private Backbone
@@ -396,7 +399,7 @@ How it works (all automated):
 |-------|-----------|------------|
 | 1 | CloudFront + WAF | DDoS, SQLi/XSS, rate limiting, geo-blocking |
 | 2 | Origin mTLS | CloudFront bypass prevention (via CloudFormation) |
-| 3 | Kong Plugins | JWT RS256 auth, per-route rate limiting, CORS, request transform |
+| 3 | Kong Plugins | OpenID Connect (Cognito JWKS), per-route rate limiting, CORS, request transform |
 | 4 | Transit Gateway | Private connectivity — backends never exposed publicly |
 | 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods (ztunnel) |
 | 6 | Waypoint AuthZ | L7 authorization policies for east-west traffic |
@@ -417,11 +420,11 @@ The platform uses two distinct communication patterns: **north-south** traffic e
 ```mermaid
 graph TB
     subgraph external ["North-South Traffic (Kong → Istio Gateway)"]
-        KONG[Kong Cloud Gateway<br/>JWT RS256 Auth]
+        KONG[Kong Cloud Gateway<br/>OIDC (Cognito) Auth]
     end
 
     subgraph munchgo_ns ["munchgo namespace (Istio Ambient mTLS)"]
-        AUTH3[auth-service<br/>:8080<br/>JWT Issue/Validate]
+        AUTH3[auth-service<br/>:8080<br/>Cognito Facade]
         CONSUMER3[consumer-service<br/>:8080<br/>Customer Profiles]
         RESTAURANT3[restaurant-service<br/>:8080<br/>Menus & Items]
         ORDER3[order-service<br/>:8080<br/>CQRS + Event Sourcing]
@@ -438,10 +441,10 @@ graph TB
     end
 
     KONG -->|/api/auth — Public| AUTH3
-    KONG -->|/api/consumers — JWT| CONSUMER3
-    KONG -->|/api/restaurants — JWT| RESTAURANT3
-    KONG -->|/api/orders — JWT| ORDER3
-    KONG -->|/api/couriers — JWT| COURIER3
+    KONG -->|/api/consumers — OIDC| CONSUMER3
+    KONG -->|/api/restaurants — OIDC| RESTAURANT3
+    KONG -->|/api/orders — OIDC| ORDER3
+    KONG -->|/api/couriers — OIDC| COURIER3
 
     SAGA3 -->|"HTTP GET (Istio mTLS)"| CONSUMER3
     SAGA3 -->|"HTTP GET (Istio mTLS)"| RESTAURANT3
@@ -482,16 +485,16 @@ graph TB
 
 | Service | Port | Database | Kong Route | Auth | Pattern |
 |---------|------|----------|------------|------|---------|
-| **auth-service** | 8080 | munchgo_auth | `/api/auth` | Public | JWT RS256 issuer |
-| **consumer-service** | 8080 | munchgo_consumers | `/api/consumers` | JWT | CRUD |
-| **restaurant-service** | 8080 | munchgo_restaurants | `/api/restaurants` | JWT | CRUD |
-| **order-service** | 8080 | munchgo_orders | `/api/orders` | JWT | CQRS + Event Sourcing |
-| **courier-service** | 8080 | munchgo_couriers | `/api/couriers` | JWT | CRUD |
+| **auth-service** | 8080 | munchgo_auth | `/api/auth` | Public | Cognito facade |
+| **consumer-service** | 8080 | munchgo_consumers | `/api/consumers` | OIDC | CRUD |
+| **restaurant-service** | 8080 | munchgo_restaurants | `/api/restaurants` | OIDC | CRUD |
+| **order-service** | 8080 | munchgo_orders | `/api/orders` | OIDC | CQRS + Event Sourcing |
+| **courier-service** | 8080 | munchgo_couriers | `/api/couriers` | OIDC | CRUD |
 | **saga-orchestrator** | 8080 | munchgo_sagas | *Internal only* | Mesh mTLS | Saga Orchestration |
 
-### Authentication & JWT Flow
+### Authentication — Amazon Cognito + OIDC
 
-Custom JWT implementation using **RS256 asymmetric signing** (2048-bit RSA). No external IDP (Keycloak, Auth0, Cognito) — the Auth Service handles registration, login, and token issuance. Kong validates tokens at the edge; backend services trust Kong's verification.
+**Amazon Cognito** is the identity provider. The auth-service acts as a **Cognito facade** — it proxies registration/login to Cognito and publishes Kafka events for the service cascade. Kong validates tokens at the edge using the **OpenID Connect** plugin with automatic JWKS discovery from Cognito.
 
 ```mermaid
 sequenceDiagram
@@ -499,41 +502,47 @@ sequenceDiagram
     participant CF as CloudFront + WAF
     participant Kong as Kong Gateway
     participant Auth as auth-service
+    participant Cognito as Amazon Cognito
     participant Svc as other services
 
-    Note over C,Auth: Registration / Login (public route)
+    Note over C,Cognito: Registration / Login (public route)
     C->>CF: POST /api/auth/register or /login
-    CF->>Kong: Forward (no JWT required)
+    CF->>Kong: Forward (no auth required)
     Kong->>Auth: Forward (public route)
-    Auth->>Auth: BCrypt hash password · Create user
-    Auth-->>Kong: { accessToken (RS256 JWT, 1hr), refreshToken (7 days) }
+    Auth->>Cognito: AdminCreateUser + AdminSetUserPassword<br/>or InitiateAuth (USER_PASSWORD_AUTH)
+    Cognito-->>Auth: Cognito tokens (access + ID + refresh)
+    Auth->>Auth: Create/lookup thin local user<br/>Publish Kafka event
+    Auth-->>Kong: { accessToken, idToken, refreshToken }
     Kong-->>CF: Response
     CF-->>C: Tokens returned
 
     Note over C,Svc: Authenticated API Call (protected route)
-    C->>CF: GET /api/orders (Authorization: Bearer <JWT>)
+    C->>CF: GET /api/orders (Authorization: Bearer <access_token>)
     CF->>Kong: Forward
-    Kong->>Kong: JWT Plugin: verify RS256 signature<br/>Check iss = munchgo-auth-service<br/>Check exp not passed
-    Kong->>Svc: Forward (JWT valid)
+    Kong->>Kong: OIDC Plugin: fetch Cognito JWKS<br/>Verify token signature + expiry<br/>Extract claims → upstream headers
+    Kong->>Svc: Forward + X-User-Sub, X-User-Email, X-User-Roles
     Svc-->>Kong: Response
     Kong-->>CF: Response
     CF-->>C: Data returned
 ```
 
-**JWT token structure:**
-- Algorithm: RS256 (RSA + SHA-256)
-- Claims: `sub` (userId), `iss` (munchgo-auth-service), `username`, `email`, `roles[]`, `iat`, `exp`
-- Access token: 1 hour expiry
-- Refresh token: 7 days, stored in database, supports rotation
+**Amazon Cognito User Pool:**
+- Password policy: min 8 chars, uppercase/lowercase/numbers/symbols
+- User Pool Groups: `ROLE_CUSTOMER`, `ROLE_RESTAURANT_OWNER`, `ROLE_COURIER`, `ROLE_ADMIN`
+- Pre Token Generation Lambda (V2): adds `custom:roles` claim to access + ID tokens
+- Token validity: Access=1hr, ID=1hr, Refresh=7 days
+- Secrets stored in AWS Secrets Manager, synced to K8s via External Secrets Operator
 
-**Kong JWT verification:**
-- Kong matches the `iss` claim to a registered consumer credential
-- Verifies the RS256 signature using the Auth Service's public key
-- Protected routes: `/api/consumers`, `/api/orders`, `/api/couriers`, `/api/restaurants` (POST/PUT)
+**Kong OIDC token validation:**
+- Kong discovers Cognito JWKS endpoint automatically via `.well-known/openid-configuration`
+- Verifies token signature, expiry, and issuer
+- Forwards user claims as upstream headers: `X-User-Sub`, `X-User-Email`, `X-User-Roles`
+- Protected routes: `/api/consumers`, `/api/orders`, `/api/couriers`, `/api/restaurants`
 - Public routes: `/api/auth/*` (register, login, refresh, logout), `/healthz`
+- JWKS keys are cached (300s TTL) — automatic rotation with zero downtime
 
 **User registration triggers Kafka events:**
-- Auth Service publishes `UserRegisteredEvent` to the `user-events` Kafka topic
+- Auth Service registers user in Cognito, creates a thin local user reference (cognitoSub mapping), and publishes `UserRegisteredEvent` to Kafka
 - Consumer Service auto-creates a Consumer profile (for `ROLE_CUSTOMER` users)
 - Courier Service auto-creates a Courier profile (for `ROLE_COURIER` users)
 
@@ -673,7 +682,8 @@ graph LR
 │   │   └── health-responder.yaml   # Gateway health check endpoint
 │   ├── external-secrets/
 │   │   ├── cluster-secret-store.yaml   # AWS Secrets Manager ClusterSecretStore
-│   │   └── munchgo-db-secret.yaml      # ExternalSecrets for 6 service databases
+│   │   ├── munchgo-db-secret.yaml      # ExternalSecrets for 6 service databases
+│   │   └── munchgo-cognito-secret.yaml # ExternalSecret for Cognito config (User Pool ID, Client ID)
 │   └── istio/
 │       ├── gateway.yaml            # Istio Gateway (internal NLB + TLS)
 │       ├── httproutes.yaml         # MunchGo API routes + ReferenceGrants
@@ -696,13 +706,14 @@ graph LR
     └── modules/
         ├── vpc/                    # VPC, subnets, NAT, IGW
         ├── eks/                    # EKS cluster + system/user node pools
-        ├── iam/                    # LB Controller IRSA + External Secrets IRSA
+        ├── iam/                    # LB Controller IRSA + External Secrets IRSA + Cognito Auth IRSA
         ├── lb-controller/          # AWS Load Balancer Controller (Helm)
         ├── argocd/                 # ArgoCD + root app bootstrap
         ├── cloudfront/             # CloudFront + WAF + Origin mTLS
         ├── ecr/                    # 6 ECR repositories (MunchGo services)
         ├── msk/                    # Amazon MSK Kafka cluster
         ├── rds/                    # RDS PostgreSQL + Secrets Manager
+        ├── cognito/                # Amazon Cognito User Pool, App Client, Groups, Lambda
         └── spa/                    # S3 bucket for React SPA
 ```
 
@@ -890,7 +901,7 @@ graph TB
     end
 
     subgraph L5 ["Layer 5: API Config — Kong Konnect"]
-        KongGW2[Kong Cloud Gateway<br/>JWT · Rate Limit · CORS<br/>Connects via Transit Gateway]
+        KongGW2[Kong Cloud Gateway<br/>OIDC (Cognito) · Rate Limit · CORS<br/>Connects via Transit Gateway]
     end
 
     subgraph L6 ["Layer 6: Edge Security — Terraform"]
@@ -1038,7 +1049,7 @@ kubectl get secret -n munchgo
 export APP_URL=$(terraform -chdir=terraform output -raw application_url)
 curl $APP_URL/healthz
 curl $APP_URL/api/auth/health
-curl -H "Authorization: Bearer <jwt>" $APP_URL/api/orders
+curl -H "Authorization: Bearer <cognito_access_token>" $APP_URL/api/orders
 ```
 
 ---
@@ -1101,8 +1112,7 @@ Once deployed, everything is visible at [cloud.konghq.com](https://cloud.konghq.
 | **API Analytics** | Analytics → Dashboard (request counts, latency P50/P95/P99, error rates) |
 | **Gateway Health** | Gateway Manager → Data Plane Nodes (status, connections) |
 | **Routes & Services** | Gateway Manager → Routes / Services |
-| **Plugins** | Gateway Manager → Plugins (JWT, rate limiting, CORS, transforms) |
-| **Consumers** | Gateway Manager → Consumers (JWT credentials, usage) |
+| **Plugins** | Gateway Manager → Plugins (OpenID Connect, rate limiting, CORS, transforms) |
 
 ---
 
@@ -1144,6 +1154,7 @@ Tears down the **full stack** in the correct order:
 | `rds_multi_az` | `false` | Multi-AZ for production |
 | `enable_spa` | `true` | Create S3 SPA bucket |
 | `enable_external_secrets` | `true` | External Secrets IRSA |
+| `enable_cognito` | `true` | Amazon Cognito User Pool + IRSA |
 | `enable_cloudfront` | `true` | CloudFront + WAF |
 | `kong_cloud_gateway_domain` | `""` | Kong proxy domain (from Konnect) |
 | `enable_waf` | `true` | WAF Web ACL |

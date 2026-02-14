@@ -359,3 +359,82 @@ resource "aws_iam_role_policy_attachment" "external_secrets" {
   policy_arn = aws_iam_policy.external_secrets[0].arn
   role       = aws_iam_role.external_secrets[0].name
 }
+
+# ==============================================================================
+# COGNITO AUTH SERVICE IRSA ROLE
+# ==============================================================================
+# Allows the MunchGo auth-service pods to call Cognito Admin APIs:
+#   - AdminInitiateAuth, AdminCreateUser, AdminSetUserPassword
+#   - AdminAddUserToGroup, AdminGetUser, AdminListGroupsForUser
+#   - GlobalSignOut
+# The auth-service acts as a Cognito facade — it proxies registration/login
+# to Cognito and publishes Kafka events for the service cascade.
+
+resource "aws_iam_policy" "cognito_auth_service" {
+  count       = var.enable_cognito ? 1 : 0
+  name        = "policy-cognito-auth-${var.name_prefix}"
+  description = "IAM policy for MunchGo auth-service to call Cognito Admin APIs"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:AdminInitiateAuth",
+          "cognito-idp:AdminRespondToAuthChallenge",
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminSetUserPassword",
+          "cognito-idp:AdminAddUserToGroup",
+          "cognito-idp:AdminRemoveUserFromGroup",
+          "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminListGroupsForUser",
+          "cognito-idp:AdminDisableUser",
+          "cognito-idp:AdminEnableUser",
+          "cognito-idp:AdminUserGlobalSignOut",
+          "cognito-idp:ListUsers",
+          "cognito-idp:SignUp",
+          "cognito-idp:ConfirmSignUp",
+          "cognito-idp:InitiateAuth",
+          "cognito-idp:GlobalSignOut",
+          "cognito-idp:RevokeToken",
+          "cognito-idp:DescribeUserPool",
+          "cognito-idp:DescribeUserPoolClient"
+        ]
+        Resource = "arn:aws:cognito-idp:*:*:userpool/*"
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role" "cognito_auth_service" {
+  count = var.enable_cognito ? 1 : 0
+  name  = "role-cognito-auth-${var.name_prefix}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Effect = "Allow"
+      Principal = {
+        Federated = var.oidc_provider_arn
+      }
+      Condition = {
+        StringEquals = {
+          "${var.oidc_provider_url}:sub" = "system:serviceaccount:munchgo:munchgo-auth-service"
+          "${var.oidc_provider_url}:aud" = "sts.amazonaws.com"
+        }
+      }
+    }]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "cognito_auth_service" {
+  count      = var.enable_cognito ? 1 : 0
+  policy_arn = aws_iam_policy.cognito_auth_service[0].arn
+  role       = aws_iam_role.cognito_auth_service[0].name
+}

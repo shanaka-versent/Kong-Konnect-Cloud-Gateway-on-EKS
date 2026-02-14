@@ -150,6 +150,37 @@ output "external_secrets_role_arn" {
   value       = var.enable_external_secrets ? module.iam.external_secrets_role_arn : null
 }
 
+# Cognito
+output "cognito_user_pool_id" {
+  description = "Cognito User Pool ID"
+  value       = var.enable_cognito ? module.cognito[0].user_pool_id : null
+}
+
+output "cognito_app_client_id" {
+  description = "Cognito App Client ID"
+  value       = var.enable_cognito ? module.cognito[0].app_client_id : null
+}
+
+output "cognito_issuer_url" {
+  description = "Cognito OIDC issuer URL (for Kong openid-connect plugin)"
+  value       = var.enable_cognito ? module.cognito[0].issuer_url : null
+}
+
+output "cognito_domain" {
+  description = "Cognito User Pool domain URL"
+  value       = var.enable_cognito ? module.cognito[0].domain : null
+}
+
+output "cognito_secret_name" {
+  description = "Secrets Manager secret name for Cognito config (update External Secrets with this value)"
+  value       = var.enable_cognito ? module.cognito[0].cognito_secret_name : null
+}
+
+output "cognito_auth_service_role_arn" {
+  description = "Cognito auth-service IRSA role ARN (annotate K8s service account with this)"
+  value       = var.enable_cognito ? module.iam.cognito_auth_service_role_arn : null
+}
+
 # ==============================================================================
 # KONG CLOUD GATEWAY SETUP
 # ==============================================================================

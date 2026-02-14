@@ -191,6 +191,43 @@ variable "enable_external_secrets" {
 }
 
 # ==============================================================================
+# COGNITO AUTHENTICATION
+# ==============================================================================
+# Amazon Cognito User Pool for MunchGo end-user authentication.
+# Replaces the custom JWT implementation with a managed identity provider.
+# Kong Cloud Gateway validates Cognito tokens via the openid-connect plugin.
+
+variable "enable_cognito" {
+  description = "Enable Amazon Cognito User Pool for MunchGo authentication"
+  type        = bool
+  default     = true
+}
+
+variable "cognito_callback_urls" {
+  description = "OAuth2 callback URLs for Cognito app client (e.g., SPA redirect URIs)"
+  type        = list(string)
+  default     = []
+}
+
+variable "cognito_logout_urls" {
+  description = "OAuth2 logout URLs for Cognito app client"
+  type        = list(string)
+  default     = []
+}
+
+variable "cognito_enable_mfa" {
+  description = "Enable Multi-Factor Authentication on Cognito User Pool"
+  type        = bool
+  default     = false
+}
+
+variable "cognito_deletion_protection" {
+  description = "Enable deletion protection on Cognito User Pool (recommended for production)"
+  type        = bool
+  default     = false
+}
+
+# ==============================================================================
 # CLOUDFRONT + WAF (Edge Security Layer)
 # ==============================================================================
 # CloudFront + WAF sits in front of Kong Cloud Gateway's public proxy URL.
