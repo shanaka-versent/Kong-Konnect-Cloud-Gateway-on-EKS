@@ -997,7 +997,7 @@ flowchart TB
 
 ## Deployment
 
-Seven steps, zero manual console clicks. Terraform handles infrastructure in two phases (CloudFront depends on the Kong proxy URL from Step 5), ArgoCD syncs K8s resources, and scripts automate Konnect setup.
+Eight steps, zero manual console clicks. Terraform handles infrastructure in two phases (CloudFront depends on the Kong proxy URL from Step 5), ArgoCD syncs K8s resources, and scripts automate Konnect + Cognito setup.
 
 ### Deployment Layers
 
@@ -1085,11 +1085,12 @@ terraform -chdir=terraform apply
 This creates Layers 1-3 in one shot:
 - VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway + RAM share
 - **ECR** (6 repositories), **MSK** (Kafka), **RDS** (PostgreSQL + 6 databases), **S3** (SPA bucket)
+- **Amazon Cognito** — User Pool, App Client, User Pool Groups, Pre Token Generation Lambda, Secrets Manager entries
 - ArgoCD + **root application** (App of Apps) — bootstrapped automatically
 
 ArgoCD immediately begins syncing all Layer 3 child apps via **sync waves** in dependency order (see table above). The `09-munchgo-apps.yaml` bridge app (sync wave 8) discovers Layer 4 service Applications from the `munchgo-k8s-config` GitOps repo.
 
-> CloudFront + WAF (Layer 6) is deployed in Step 7 after the Kong proxy URL is available.
+> CloudFront + WAF (Layer 6) is deployed in Step 8 after the Kong proxy URL is available.
 
 ### Step 3: Configure kubectl
 
@@ -1119,13 +1120,26 @@ Fully automates Konnect and AWS setup:
 3. Shares Transit Gateway via AWS RAM
 4. Auto-accepts TGW attachment
 
-### Step 6: Configure Kong Routes
+### Step 6: Populate Config Placeholders
 
 ```bash
 ./scripts/03-post-terraform-setup.sh
 ```
 
-Update `deck/kong.yaml` with the NLB hostname, then sync:
+This script **automatically reads all Terraform outputs** and populates every placeholder across the deployment:
+
+| File | Placeholders Replaced |
+|------|----------------------|
+| `deck/kong.yaml` | `PLACEHOLDER_NLB_DNS`, `PLACEHOLDER_COGNITO_ISSUER_URL` |
+| `k8s/external-secrets/munchgo-cognito-secret.yaml` | `PLACEHOLDER-munchgo-cognito` |
+| `k8s/external-secrets/munchgo-db-secret.yaml` | All 7 `PLACEHOLDER-munchgo-*-db` secrets |
+| `munchgo-k8s-config/overlays/dev/auth-service/kustomization.yaml` | `COGNITO_AUTH_SERVICE_ROLE_ARN` |
+
+> The script waits for the Istio Gateway NLB to be provisioned before replacing `PLACEHOLDER_NLB_DNS`. If the NLB isn't ready, it skips that placeholder and you can re-run the script later.
+
+### Step 7: Sync Kong Configuration
+
+Push the populated config to Kong Konnect:
 
 ```bash
 deck gateway sync deck/kong.yaml \
@@ -1134,7 +1148,15 @@ deck gateway sync deck/kong.yaml \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
 
-### Step 7: Deploy CloudFront + WAF
+Commit the populated files so ArgoCD picks up the ExternalSecret changes:
+
+```bash
+git add deck/kong.yaml k8s/external-secrets/
+git commit -m "Populate deployment placeholders from terraform outputs"
+git push
+```
+
+### Step 8: Deploy CloudFront + WAF
 
 Get the **Public Edge DNS** from Konnect UI → Gateway Manager → Connect.
 
@@ -1145,6 +1167,35 @@ kong_cloud_gateway_domain = "<hash>.aws-ap-southeast-2.edge.gateways.konggateway
 
 ```bash
 terraform -chdir=terraform apply
+```
+
+> **CloudFront is mandatory** — WAF rules protect against OWASP Top 10, bot traffic, and DDoS. The CloudFront→Kong origin uses mTLS to prevent bypassing edge security.
+
+### Access URL
+
+After Step 8 completes, your application URL is the CloudFront distribution domain:
+
+```bash
+export APP_URL=$(terraform -chdir=terraform output -raw application_url)
+echo "Application URL: $APP_URL"
+```
+
+All API traffic must flow through CloudFront → WAF → Kong Cloud Gateway → Istio mesh:
+
+```
+Client → CloudFront (WAF) → Kong Cloud Gateway (OIDC) → Transit GW → NLB → Istio Gateway → Services
+```
+
+### Generate a Test Token (Optional)
+
+```bash
+./scripts/02-generate-jwt.sh
+```
+
+Registers a test user in Cognito and returns access/ID/refresh tokens. Use the access token to test protected APIs:
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" $APP_URL/api/orders
 ```
 
 ---
@@ -1163,7 +1214,7 @@ kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
 # HTTPRoutes
 kubectl get httproute -A
 
-# MunchGo services
+# MunchGo services (all pods running)
 kubectl get pods -n munchgo
 kubectl get svc -n munchgo
 
@@ -1174,15 +1225,25 @@ kubectl get gateway -n munchgo munchgo-waypoint
 kubectl get peerauthentication -n munchgo
 kubectl get authorizationpolicy -n munchgo
 
-# External Secrets
+# External Secrets (all synced, no errors)
 kubectl get externalsecret -n munchgo
 kubectl get secret -n munchgo
 
-# End-to-end test
+# Cognito — verify secret injected
+kubectl get secret munchgo-cognito-config -n munchgo -o jsonpath='{.data}' | python3 -c \
+  "import sys,json,base64; d=json.load(sys.stdin); [print(f'{k}: {base64.b64decode(v).decode()}') for k,v in d.items()]"
+
+# Auth service IRSA — verify service account annotation
+kubectl get serviceaccount munchgo-auth-service -n munchgo -o yaml | grep role-arn
+
+# End-to-end: public health check
 export APP_URL=$(terraform -chdir=terraform output -raw application_url)
 curl $APP_URL/healthz
 curl $APP_URL/api/auth/health
-curl -H "Authorization: Bearer <cognito_access_token>" $APP_URL/api/orders
+
+# End-to-end: authenticated API call
+./scripts/02-generate-jwt.sh
+curl -H "Authorization: Bearer $ACCESS_TOKEN" $APP_URL/api/orders
 ```
 
 ---
