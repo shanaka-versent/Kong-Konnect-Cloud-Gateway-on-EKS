@@ -11,7 +11,11 @@ The entire stack deploys with **zero manual steps** — Terraform provisions inf
 ## Table of Contents
 
 - [Architecture](#architecture)
+  - [Istio Ambient Service Mesh](#istio-ambient-service-mesh)
+  - [East-West Traffic](#east-west-traffic--how-services-communicate)
 - [MunchGo Microservices](#munchgo-microservices)
+  - [Authentication & JWT Flow](#authentication--jwt-flow)
+  - [Order Saga Flow](#order-saga-flow)
 - [Repository Structure](#repository-structure)
 - [GitOps Pipeline](#gitops-pipeline)
 - [Prerequisites](#prerequisites)
@@ -237,6 +241,92 @@ graph TB
 | **AuthorizationPolicy** | Access control | Restricts saga-orchestrator, allows gateway ingress |
 | **Telemetry** | Observability | Jaeger tracing (100%), Prometheus metrics, access logs |
 
+### East-West Traffic — How Services Communicate
+
+MunchGo uses a **hybrid communication model**: synchronous HTTP calls for saga orchestration (protected by Istio mTLS) and asynchronous Kafka events for domain events (via external MSK).
+
+**Only the Saga Orchestrator makes direct HTTP calls to other services.** All other services communicate exclusively via Kafka. Istio authorization policies enforce this — even though all services have ClusterIP endpoints, only authorized sources can reach them.
+
+```mermaid
+graph TB
+    subgraph mesh_ew ["munchgo namespace — Istio Ambient mTLS"]
+        SAGA_EW[saga-orchestrator]
+        CONSUMER_EW[consumer-service]
+        RESTAURANT_EW[restaurant-service]
+        ORDER_EW[order-service]
+        COURIER_EW[courier-service]
+        AUTH_EW[auth-service]
+    end
+
+    subgraph external_ew ["External (outside mesh)"]
+        KAFKA_EW[Amazon MSK<br/>Kafka]
+    end
+
+    SAGA_EW -->|"HTTP GET /api/v1/consumers/{id}<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| CONSUMER_EW
+    SAGA_EW -->|"HTTP GET /api/v1/restaurants/{id}<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| RESTAURANT_EW
+    SAGA_EW -->|"HTTP POST /api/v1/orders<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| ORDER_EW
+
+    SAGA_EW -.->|"Kafka: saga-commands<br/>(assign courier)"| KAFKA_EW
+    KAFKA_EW -.->|"Kafka: saga-replies<br/>(courier assigned)"| SAGA_EW
+    AUTH_EW -.->|"Kafka: user-events<br/>(user registered)"| KAFKA_EW
+    KAFKA_EW -.->|"Kafka: user-events"| CONSUMER_EW
+    KAFKA_EW -.->|"Kafka: user-events"| COURIER_EW
+
+    style SAGA_EW fill:#8B0000,color:#fff
+    style AUTH_EW fill:#2E8B57,color:#fff
+    style CONSUMER_EW fill:#2E8B57,color:#fff
+    style RESTAURANT_EW fill:#2E8B57,color:#fff
+    style ORDER_EW fill:#2E8B57,color:#fff
+    style COURIER_EW fill:#2E8B57,color:#fff
+    style KAFKA_EW fill:#FF9900,color:#fff
+    style mesh_ew fill:#F0F0F0,stroke:#BBB,color:#333
+    style external_ew fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+**Solid arrows** = synchronous HTTP (encrypted by Istio ztunnel mTLS, authorized by waypoint L7 policy).
+**Dashed arrows** = asynchronous Kafka (external to mesh, via Amazon MSK).
+
+#### Service Communication Matrix
+
+| Source | Target | Protocol | Path / Topic | Istio mTLS? |
+|--------|--------|----------|-------------|-------------|
+| **Saga Orchestrator** | Consumer Service | HTTP GET | `/api/v1/consumers/{id}` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Restaurant Service | HTTP GET | `/api/v1/restaurants/{id}` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Order Service | HTTP POST/PUT | `/api/v1/orders`, `/api/v1/orders/{id}/approve` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Courier Service | Kafka | `saga-commands` topic | No (external MSK) |
+| Courier Service | Saga Orchestrator | Kafka | `saga-replies` topic | No (external MSK) |
+| Auth Service | Consumer Service | Kafka | `user-events` topic | No (external MSK) |
+| Auth Service | Courier Service | Kafka | `user-events` topic | No (external MSK) |
+| Istio Gateway | All services | HTTP | HTTPRoute path-based routing | Yes (ztunnel) |
+
+#### How ztunnel and Waypoint Handle East-West Traffic
+
+When the Saga Orchestrator calls the Consumer Service via HTTP:
+
+```
+Saga Pod → ztunnel (mTLS encrypt) → Waypoint (L7 AuthZ check) → ztunnel (mTLS decrypt) → Consumer Pod
+```
+
+1. **ztunnel** on the source node intercepts outbound traffic and encrypts it with mTLS (SPIFFE identity)
+2. **Waypoint proxy** receives the encrypted traffic, terminates mTLS, and enforces L7 authorization policies (checking that the source service account is `munchgo-order-saga-orchestrator`)
+3. **ztunnel** on the destination node re-encrypts and delivers to the Consumer pod
+4. The **waypoint** also emits L7 telemetry: Jaeger traces, Prometheus request metrics, and access logs
+
+Kafka traffic bypasses Istio entirely because MSK runs outside the cluster in dedicated AWS-managed infrastructure.
+
+#### Istio Authorization Policies (Least Privilege)
+
+Four policies enforce the communication matrix:
+
+| Policy | What It Does |
+|--------|-------------|
+| `allow-gateway-ingress` | Istio Gateway (istio-ingress namespace) can reach all 5 API services |
+| `allow-saga-orchestrator` | Saga Orchestrator service account can call Consumer, Restaurant, Order, Courier |
+| `restrict-saga-orchestrator` | Saga Orchestrator only reachable from within munchgo namespace + Istio Gateway |
+| `allow-health-checks` | Any source can reach `/actuator/health/*` endpoints (for K8s probes) |
+
+**Default deny**: any traffic not explicitly allowed is blocked. If Consumer Service tried to call Order Service via HTTP, the waypoint would reject it — only Saga Orchestrator has that permission.
+
 ### Private Connectivity
 
 ```mermaid
@@ -322,22 +412,24 @@ A food delivery platform built with Java 21 + Spring Boot, following event-drive
 
 ### Service Architecture
 
+The platform uses two distinct communication patterns: **north-south** traffic enters via Kong Cloud Gateway through the Istio Gateway, while **east-west** traffic between services uses a mix of synchronous HTTP (via Istio mTLS) and asynchronous Kafka events (via external MSK).
+
 ```mermaid
 graph TB
-    subgraph external ["External Traffic (North-South)"]
+    subgraph external ["North-South Traffic (Kong → Istio Gateway)"]
         KONG[Kong Cloud Gateway<br/>JWT RS256 Auth]
     end
 
-    subgraph munchgo_ns ["munchgo namespace (Istio Ambient)"]
+    subgraph munchgo_ns ["munchgo namespace (Istio Ambient mTLS)"]
         AUTH3[auth-service<br/>:8080<br/>JWT Issue/Validate]
         CONSUMER3[consumer-service<br/>:8080<br/>Customer Profiles]
         RESTAURANT3[restaurant-service<br/>:8080<br/>Menus & Items]
         ORDER3[order-service<br/>:8080<br/>CQRS + Event Sourcing]
         COURIER3[courier-service<br/>:8080<br/>Delivery Assignments]
-        SAGA3[saga-orchestrator<br/>:8080<br/>Order Saga Coordinator]
+        SAGA3[saga-orchestrator<br/>:8080<br/>Saga Coordination]
     end
 
-    subgraph messaging ["Event-Driven Messaging"]
+    subgraph messaging ["Async Messaging (external to mesh)"]
         KAFKA[Amazon MSK<br/>Kafka 3.6.0]
     end
 
@@ -351,14 +443,15 @@ graph TB
     KONG -->|/api/orders — JWT| ORDER3
     KONG -->|/api/couriers — JWT| COURIER3
 
-    ORDER3 -->|OrderCreated| KAFKA
-    KAFKA -->|OrderCreated| SAGA3
-    SAGA3 -->|ValidateConsumer| KAFKA
-    KAFKA -->|ValidateConsumer| CONSUMER3
-    SAGA3 -->|ValidateRestaurant| KAFKA
-    KAFKA -->|ValidateRestaurant| RESTAURANT3
-    SAGA3 -->|AssignCourier| KAFKA
-    KAFKA -->|AssignCourier| COURIER3
+    SAGA3 -->|"HTTP GET (Istio mTLS)"| CONSUMER3
+    SAGA3 -->|"HTTP GET (Istio mTLS)"| RESTAURANT3
+    SAGA3 -->|"HTTP POST/PUT (Istio mTLS)"| ORDER3
+
+    AUTH3 -.->|"Kafka: user-events"| KAFKA
+    SAGA3 -.->|"Kafka: saga-commands"| KAFKA
+    KAFKA -.->|"Kafka: user-events"| CONSUMER3
+    KAFKA -.->|"Kafka: user-events"| COURIER3
+    KAFKA -.->|"Kafka: saga-replies"| SAGA3
 
     AUTH3 -->|munchgo_auth| DB
     CONSUMER3 -->|munchgo_consumers| DB
@@ -382,6 +475,9 @@ graph TB
     style storage fill:#F5F5F5,stroke:#CCC,color:#333
 ```
 
+> **Solid arrows** between services = synchronous HTTP calls, encrypted by Istio ztunnel mTLS and authorized by waypoint L7 policy.
+> **Dashed arrows** to/from Kafka = asynchronous events, external to the mesh (Amazon MSK).
+
 ### Service Details
 
 | Service | Port | Database | Kong Route | Auth | Pattern |
@@ -393,36 +489,117 @@ graph TB
 | **courier-service** | 8080 | munchgo_couriers | `/api/couriers` | JWT | CRUD |
 | **saga-orchestrator** | 8080 | munchgo_sagas | *Internal only* | Mesh mTLS | Saga Orchestration |
 
-### Order Saga Flow
+### Authentication & JWT Flow
+
+Custom JWT implementation using **RS256 asymmetric signing** (2048-bit RSA). No external IDP (Keycloak, Auth0, Cognito) — the Auth Service handles registration, login, and token issuance. Kong validates tokens at the edge; backend services trust Kong's verification.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant O as order-service
-    participant K as Kafka (MSK)
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Auth as auth-service
+    participant Svc as other services
+
+    Note over C,Auth: Registration / Login (public route)
+    C->>CF: POST /api/auth/register or /login
+    CF->>Kong: Forward (no JWT required)
+    Kong->>Auth: Forward (public route)
+    Auth->>Auth: BCrypt hash password · Create user
+    Auth-->>Kong: { accessToken (RS256 JWT, 1hr), refreshToken (7 days) }
+    Kong-->>CF: Response
+    CF-->>C: Tokens returned
+
+    Note over C,Svc: Authenticated API Call (protected route)
+    C->>CF: GET /api/orders (Authorization: Bearer <JWT>)
+    CF->>Kong: Forward
+    Kong->>Kong: JWT Plugin: verify RS256 signature<br/>Check iss = munchgo-auth-service<br/>Check exp not passed
+    Kong->>Svc: Forward (JWT valid)
+    Svc-->>Kong: Response
+    Kong-->>CF: Response
+    CF-->>C: Data returned
+```
+
+**JWT token structure:**
+- Algorithm: RS256 (RSA + SHA-256)
+- Claims: `sub` (userId), `iss` (munchgo-auth-service), `username`, `email`, `roles[]`, `iat`, `exp`
+- Access token: 1 hour expiry
+- Refresh token: 7 days, stored in database, supports rotation
+
+**Kong JWT verification:**
+- Kong matches the `iss` claim to a registered consumer credential
+- Verifies the RS256 signature using the Auth Service's public key
+- Protected routes: `/api/consumers`, `/api/orders`, `/api/couriers`, `/api/restaurants` (POST/PUT)
+- Public routes: `/api/auth/*` (register, login, refresh, logout), `/healthz`
+
+**User registration triggers Kafka events:**
+- Auth Service publishes `UserRegisteredEvent` to the `user-events` Kafka topic
+- Consumer Service auto-creates a Consumer profile (for `ROLE_CUSTOMER` users)
+- Courier Service auto-creates a Courier profile (for `ROLE_COURIER` users)
+
+### Order Saga Flow
+
+The saga orchestrator uses a **hybrid approach**: synchronous HTTP calls (via Istio mTLS) for validation and order management, and asynchronous Kafka commands for courier assignment. Circuit breakers (Resilience4j) protect all HTTP calls.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Kong as Kong Gateway
+    participant IG as Istio Gateway
     participant S as saga-orchestrator
     participant CS as consumer-service
     participant RS as restaurant-service
+    participant O as order-service
+    participant K as Kafka (MSK)
     participant CR as courier-service
 
-    C->>O: POST /api/orders
-    O->>K: OrderCreated event
-    K->>S: OrderCreated
-    S->>K: ValidateConsumer command
-    K->>CS: Validate consumer exists
-    CS->>K: ConsumerValidated
-    K->>S: ConsumerValidated
-    S->>K: ValidateRestaurant command
-    K->>RS: Validate restaurant/menu
-    RS->>K: RestaurantValidated
-    K->>S: RestaurantValidated
-    S->>K: AssignCourier command
-    K->>CR: Find available courier
-    CR->>K: CourierAssigned
-    K->>S: CourierAssigned
-    S->>K: OrderApproved
-    K->>O: Update order status
+    Note over C,Kong: North-South (JWT verified by Kong)
+    C->>Kong: POST /api/orders
+    Kong->>IG: Forward (JWT valid)
+    IG->>S: HTTPRoute → saga-orchestrator
+
+    Note over S,CS: East-West HTTP (Istio mTLS + Waypoint AuthZ)
+    rect rgb(240, 248, 255)
+        S->>CS: Step 1: GET /api/v1/consumers/{id}
+        CS-->>S: 200 OK (consumer valid)
+    end
+
+    rect rgb(240, 248, 255)
+        S->>RS: Step 2: GET /api/v1/restaurants/{id}
+        RS-->>S: 200 OK (restaurant valid)
+    end
+
+    rect rgb(240, 248, 255)
+        S->>O: Step 3: POST /api/v1/orders
+        O-->>S: 201 Created (orderId)
+    end
+
+    Note over S,CR: Async via Kafka (external MSK)
+    rect rgb(255, 248, 240)
+        S->>K: Step 4: saga-commands (ASSIGN_COURIER)
+        K->>CR: Assign available courier
+        CR->>K: saga-replies (CourierAssigned)
+        K->>S: CourierAssigned (courierId)
+    end
+
+    Note over S,O: East-West HTTP (Istio mTLS)
+    rect rgb(240, 248, 255)
+        S->>O: Step 5: POST /api/v1/orders/{id}/approve
+        O-->>S: 200 OK (order approved)
+    end
+
+    Note over S,S: If any step fails → compensation
 ```
+
+**Why hybrid?** Steps 1-3 and 5 need immediate responses (is the consumer valid? does the restaurant exist?) — synchronous HTTP is appropriate. Step 4 uses Kafka because courier assignment may take time (finding an available courier), making async messaging the better fit.
+
+#### Kafka Topics
+
+| Topic | Publisher | Consumer | Purpose |
+|-------|-----------|----------|---------|
+| `user-events` | Auth Service | Consumer Service, Courier Service | Auto-create profile on user registration |
+| `saga-commands` | Saga Orchestrator | Courier Service | Assign courier to order |
+| `saga-replies` | Courier Service | Saga Orchestrator | Courier assignment result |
 
 ---
 
