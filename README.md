@@ -494,7 +494,51 @@ graph TB
 
 ### Authentication — Amazon Cognito + OIDC
 
-**Amazon Cognito** is the identity provider. The auth-service acts as a **Cognito facade** — it proxies registration/login to Cognito and publishes Kafka events for the service cascade. Kong validates tokens at the edge using the **OpenID Connect** plugin with automatic JWKS discovery from Cognito.
+**Amazon Cognito** is the identity provider. **Only the auth-service talks to Cognito** — all other services rely on Kong's upstream headers for user identity. Kong validates tokens at the edge using the **OpenID Connect** plugin with automatic JWKS discovery.
+
+#### Cognito Interaction Model
+
+| Component | Auth Responsibility |
+|-----------|-------------------|
+| **Amazon Cognito** | Identity store, password hashing, token issuance, JWKS endpoint, group membership |
+| **auth-service** | Cognito facade — proxies register/login/refresh/logout, maintains local user ref, publishes Kafka events |
+| **Kong OIDC plugin** | Token validation at the edge via JWKS, claims extraction → upstream headers |
+| **Pre Token Lambda** | Injects `custom:roles` claim into access + ID tokens based on User Pool groups |
+| **Other services** | Read `X-User-*` headers — zero auth logic, fully trust Kong's verification |
+| **Istio mTLS** | Encrypts and authenticates all pod-to-pod traffic (east-west) — separate from Cognito |
+
+```mermaid
+graph LR
+    subgraph direct ["Direct Cognito Access"]
+        AUTH_C[auth-service] -->|"AWS SDK v2<br/>(IRSA)"| COG[Amazon Cognito]
+    end
+
+    subgraph trust ["Trust Kong Headers (no Cognito access)"]
+        CS[consumer-service]
+        RS[restaurant-service]
+        OS[order-service]
+        CRS[courier-service]
+        SAGA_C[saga-orchestrator]
+    end
+
+    KONG_C[Kong OIDC Plugin] -->|"X-User-Sub<br/>X-User-Email<br/>X-User-Roles"| CS
+    KONG_C -->|upstream headers| RS
+    KONG_C -->|upstream headers| OS
+    KONG_C -->|upstream headers| CRS
+
+    style AUTH_C fill:#2E8B57,color:#fff
+    style COG fill:#DD344C,color:#fff
+    style KONG_C fill:#003459,color:#fff
+    style CS fill:#2E8B57,color:#fff
+    style RS fill:#2E8B57,color:#fff
+    style OS fill:#2E8B57,color:#fff
+    style CRS fill:#2E8B57,color:#fff
+    style SAGA_C fill:#8B0000,color:#fff
+    style direct fill:#F0F0F0,stroke:#BBB,color:#333
+    style trust fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+#### Registration Flow
 
 ```mermaid
 sequenceDiagram
@@ -503,48 +547,137 @@ sequenceDiagram
     participant Kong as Kong Gateway
     participant Auth as auth-service
     participant Cognito as Amazon Cognito
-    participant Svc as other services
+    participant Kafka as Kafka (MSK)
+    participant CS as consumer-service
+    participant CR as courier-service
 
-    Note over C,Cognito: Registration / Login (public route)
-    C->>CF: POST /api/auth/register or /login
-    CF->>Kong: Forward (no auth required)
-    Kong->>Auth: Forward (public route)
-    Auth->>Cognito: AdminCreateUser + AdminSetUserPassword<br/>or InitiateAuth (USER_PASSWORD_AUTH)
-    Cognito-->>Auth: Cognito tokens (access + ID + refresh)
-    Auth->>Auth: Create/lookup thin local user<br/>Publish Kafka event
-    Auth-->>Kong: { accessToken, idToken, refreshToken }
+    C->>CF: POST /api/auth/register<br/>{ email, password, firstName, lastName, role }
+    CF->>Kong: Forward (WAF inspected)
+    Kong->>Auth: Forward (public route — no OIDC)
+
+    rect rgb(255, 248, 240)
+        Note over Auth,Cognito: Cognito Admin API calls (AWS SDK v2 via IRSA)
+        Auth->>Cognito: 1. AdminCreateUser (email as username)
+        Auth->>Cognito: 2. AdminSetUserPassword (permanent)
+        Auth->>Cognito: 3. AdminAddUserToGroup (e.g. ROLE_CUSTOMER)
+        Auth->>Cognito: 4. AdminInitiateAuth (get tokens)
+        Cognito->>Cognito: Pre Token Lambda V2<br/>adds custom:roles claim
+        Cognito-->>Auth: { accessToken, idToken, refreshToken }
+    end
+
+    rect rgb(240, 248, 255)
+        Note over Auth,CR: Local state + Kafka event cascade
+        Auth->>Auth: getCognitoSub(email)<br/>Create thin local User { id, email, cognitoSub, role }
+        Auth->>Kafka: UserRegisteredEvent (transactional outbox)
+        Kafka->>CS: ROLE_CUSTOMER → auto-create Consumer entity
+        Kafka->>CR: ROLE_COURIER → auto-create Courier entity
+    end
+
+    Auth-->>Kong: { userId, accessToken, idToken, refreshToken }
     Kong-->>CF: Response
     CF-->>C: Tokens returned
-
-    Note over C,Svc: Authenticated API Call (protected route)
-    C->>CF: GET /api/orders (Authorization: Bearer <access_token>)
-    CF->>Kong: Forward
-    Kong->>Kong: OIDC Plugin: fetch Cognito JWKS<br/>Verify token signature + expiry<br/>Extract claims → upstream headers
-    Kong->>Svc: Forward + X-User-Sub, X-User-Email, X-User-Roles
-    Svc-->>Kong: Response
-    Kong-->>CF: Response
-    CF-->>C: Data returned
 ```
 
-**Amazon Cognito User Pool:**
+#### Login Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Auth as auth-service
+    participant Cognito as Amazon Cognito
+
+    C->>CF: POST /api/auth/login { email, password }
+    CF->>Kong: Forward (WAF inspected)
+    Kong->>Auth: Forward (public route — no OIDC)
+    Auth->>Auth: Find local user by email
+    Auth->>Cognito: AdminInitiateAuth<br/>(ADMIN_USER_PASSWORD_AUTH)
+    Cognito->>Cognito: Validate credentials<br/>Pre Token Lambda → custom:roles
+    Cognito-->>Auth: { accessToken, idToken, refreshToken }
+    Auth-->>Kong: { userId, accessToken, idToken, refreshToken }
+    Kong-->>CF: Response
+    CF-->>C: Tokens returned
+```
+
+#### Authorization Flow (Protected API Call)
+
+This is where Kong's OIDC plugin does the heavy lifting — **no microservice auth code involved**:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Svc as order-service
+
+    C->>CF: GET /api/orders<br/>Authorization: Bearer <access_token>
+    CF->>Kong: Forward (WAF inspected)
+
+    rect rgb(255, 248, 240)
+        Note over Kong: OIDC Plugin — automatic token validation
+        Kong->>Kong: 1. Fetch Cognito JWKS (cached 300s)
+        Kong->>Kong: 2. Verify signature + expiry + issuer
+        Kong->>Kong: 3. Extract claims → upstream headers
+    end
+
+    alt Token valid
+        Kong->>Svc: Forward request +<br/>X-User-Sub · X-User-Email · X-User-Roles
+        Svc->>Svc: Read X-User-* headers<br/>(trusts Kong, zero token logic)
+        Svc-->>Kong: Response
+        Kong-->>CF: Response
+        CF-->>C: Data returned
+    else Token invalid / expired
+        Kong-->>CF: 401 Unauthorized
+        CF-->>C: 401 (request never reaches backend)
+    end
+```
+
+#### Token Refresh & Logout
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Auth as auth-service
+    participant Cognito as Amazon Cognito
+
+    Note over C,Cognito: Token Refresh (public route)
+    C->>Auth: POST /api/auth/refresh { refreshToken }
+    Auth->>Cognito: InitiateAuth (REFRESH_TOKEN_AUTH)
+    Cognito-->>Auth: New accessToken + idToken
+    Auth-->>C: { accessToken, idToken }
+
+    Note over C,Cognito: Logout — Global Sign Out
+    C->>Auth: POST /api/auth/logout/{userId}
+    Auth->>Auth: Lookup user email
+    Auth->>Cognito: AdminUserGlobalSignOut(email)
+    Cognito->>Cognito: Invalidate ALL tokens for user
+    Auth-->>C: 200 OK
+    Note over C: Subsequent API calls with old tokens<br/>fail at Kong OIDC validation → 401
+```
+
+#### Cognito Configuration
+
+**User Pool:**
 - Password policy: min 8 chars, uppercase/lowercase/numbers/symbols
 - User Pool Groups: `ROLE_CUSTOMER`, `ROLE_RESTAURANT_OWNER`, `ROLE_COURIER`, `ROLE_ADMIN`
 - Pre Token Generation Lambda (V2): adds `custom:roles` claim to access + ID tokens
 - Token validity: Access=1hr, ID=1hr, Refresh=7 days
+- Provisioned by Terraform (`terraform/modules/cognito/`)
 - Secrets stored in AWS Secrets Manager, synced to K8s via External Secrets Operator
 
-**Kong OIDC token validation:**
-- Kong discovers Cognito JWKS endpoint automatically via `.well-known/openid-configuration`
-- Verifies token signature, expiry, and issuer
-- Forwards user claims as upstream headers: `X-User-Sub`, `X-User-Email`, `X-User-Roles`
+**Kong OIDC plugin (per protected route):**
+- Auto-discovers Cognito JWKS via `.well-known/openid-configuration`
+- Validates token signature, expiry, and issuer
+- Forwards claims as upstream headers: `X-User-Sub`, `X-User-Email`, `X-User-Roles`
 - Protected routes: `/api/consumers`, `/api/orders`, `/api/couriers`, `/api/restaurants`
 - Public routes: `/api/auth/*` (register, login, refresh, logout), `/healthz`
-- JWKS keys are cached (300s TTL) — automatic rotation with zero downtime
+- JWKS cache TTL: 300s — automatic key rotation with zero downtime
 
-**User registration triggers Kafka events:**
-- Auth Service registers user in Cognito, creates a thin local user reference (cognitoSub mapping), and publishes `UserRegisteredEvent` to Kafka
-- Consumer Service auto-creates a Consumer profile (for `ROLE_CUSTOMER` users)
-- Courier Service auto-creates a Courier profile (for `ROLE_COURIER` users)
+**auth-service IRSA:**
+- Runs with a K8s ServiceAccount annotated with an IAM role (`eks.amazonaws.com/role-arn`)
+- IAM policy grants Cognito Admin API access: `AdminCreateUser`, `AdminInitiateAuth`, `AdminSetUserPassword`, `AdminAddUserToGroup`, `AdminGetUser`, `AdminUserGlobalSignOut`, etc.
+- AWS SDK `DefaultCredentialsProvider` picks up IRSA tokens automatically — no hardcoded credentials
 
 ### Order Saga Flow
 
