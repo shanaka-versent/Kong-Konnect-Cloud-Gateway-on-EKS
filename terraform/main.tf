@@ -129,10 +129,14 @@ module "lb_controller" {
   cluster_dependency = module.eks.cluster_name
 }
 
-# Wait for LB Controller to be ready before ArgoCD deploys Istio Gateway
+# Wait for LB Controller webhook endpoints to be ready before ArgoCD
+# deploys apps that create Services (Istio Gateway NLB at sync wave 5).
+# The LB Controller installs a mutating webhook that intercepts all Service
+# creates — if the webhook pods aren't ready, Service creation fails with
+# "no endpoints available for service aws-load-balancer-webhook-service".
 resource "time_sleep" "wait_for_lb_controller" {
   depends_on      = [module.lb_controller]
-  create_duration = "60s"
+  create_duration = "90s"
 }
 
 # ==============================================================================
@@ -391,4 +395,10 @@ module "argocd" {
   insecure_mode      = true
   git_repo_url       = var.argocd_git_repo_url
   cluster_dependency = module.eks.cluster_name
+
+  # ArgoCD must wait for the AWS LB Controller to be fully ready.
+  # Without this, ArgoCD sync waves create Services (e.g., Istio Gateway NLB)
+  # that trigger the LB Controller's mutating webhook before its pods are up,
+  # causing "no endpoints available for service" errors.
+  depends_on = [time_sleep.wait_for_lb_controller]
 }

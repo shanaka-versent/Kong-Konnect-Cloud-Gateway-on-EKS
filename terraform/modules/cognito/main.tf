@@ -162,11 +162,13 @@ resource "aws_cognito_user_pool_client" "munchgo_app" {
   supported_identity_providers = ["COGNITO"]
 
   # OAuth scopes (for OIDC discovery)
-  allowed_oauth_flows                  = var.callback_urls != [] ? ["code"] : []
-  allowed_oauth_flows_user_pool_client = var.callback_urls != [] ? true : false
-  allowed_oauth_scopes                 = var.callback_urls != [] ? ["openid", "email", "profile"] : []
-  callback_urls                        = var.callback_urls
-  logout_urls                          = var.logout_urls
+  # Only enable code flow when callback URLs are provided (e.g., SPA with hosted UI).
+  # For API-only auth (admin-initiate-auth), no OAuth flows are needed.
+  allowed_oauth_flows                  = length(var.callback_urls) > 0 ? ["code"] : null
+  allowed_oauth_flows_user_pool_client = length(var.callback_urls) > 0
+  allowed_oauth_scopes                 = length(var.callback_urls) > 0 ? ["openid", "email", "profile"] : null
+  callback_urls                        = length(var.callback_urls) > 0 ? var.callback_urls : null
+  logout_urls                          = length(var.logout_urls) > 0 ? var.logout_urls : null
 
   # Read attributes (what the app can read)
   read_attributes = [
