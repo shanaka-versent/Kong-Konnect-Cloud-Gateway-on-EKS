@@ -8,12 +8,12 @@
 # IMPORTANT: This uses HTTPRoute (Gateway API), NOT Ingress resources
 #
 # API Routes:
-#   /healthz          → health-responder     (gateway-health namespace)
-#   /api/auth/*       → munchgo-auth-service (munchgo namespace) — public
-#   /api/consumers/*  → munchgo-consumer-service                  — JWT protected
-#   /api/restaurants/*→ munchgo-restaurant-service                — GET public, POST/PUT JWT
-#   /api/orders/*     → munchgo-order-service                     — JWT protected
-#   /api/couriers/*   → munchgo-courier-service                   — JWT protected
+#   /healthz             → health-responder     (gateway-health namespace)
+#   /api/v1/auth/*       → munchgo-auth-service (munchgo namespace) — public
+#   /api/v1/consumers/*  → munchgo-consumer-service                  — JWT protected
+#   /api/v1/restaurants/*→ munchgo-restaurant-service                — GET public, POST/PUT JWT
+#   /api/v1/orders/*     → munchgo-order-service                     — JWT protected
+#   /api/v1/couriers/*   → munchgo-courier-service                   — JWT protected
 #
 # Note: JWT authentication is handled at Kong API Gateway level (not here)
 
@@ -39,7 +39,7 @@ spec:
           port: 80
 
 ---
-# Auth Service Route - /api/auth (public — login, register, token refresh)
+# Auth Service Route - /api/v1/auth (public — login, register, token refresh)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -53,13 +53,13 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api/auth
+            value: /api/v1/auth
       backendRefs:
         - name: munchgo-auth-service
           port: 8080
 
 ---
-# Consumer Service Route - /api/consumers (JWT protected)
+# Consumer Service Route - /api/v1/consumers (JWT protected)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -73,13 +73,13 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api/consumers
+            value: /api/v1/consumers
       backendRefs:
         - name: munchgo-consumer-service
           port: 8080
 
 ---
-# Restaurant Service Route - /api/restaurants (GET public, POST/PUT JWT)
+# Restaurant Service Route - /api/v1/restaurants (GET public, POST/PUT JWT)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -93,13 +93,13 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api/restaurants
+            value: /api/v1/restaurants
       backendRefs:
         - name: munchgo-restaurant-service
           port: 8080
 
 ---
-# Order Service Route - /api/orders (JWT protected, CQRS)
+# Order Service Route - /api/v1/orders (JWT protected, CQRS)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -113,13 +113,13 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api/orders
+            value: /api/v1/orders
       backendRefs:
         - name: munchgo-order-service
           port: 8080
 
 ---
-# Courier Service Route - /api/couriers (JWT protected)
+# Courier Service Route - /api/v1/couriers (JWT protected)
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -133,7 +133,7 @@ spec:
     - matches:
         - path:
             type: PathPrefix
-            value: /api/couriers
+            value: /api/v1/couriers
       backendRefs:
         - name: munchgo-courier-service
           port: 8080

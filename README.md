@@ -16,6 +16,7 @@ The entire stack deploys with **zero manual steps** — Terraform provisions inf
 - [MunchGo Microservices](#munchgo-microservices)
   - [Authentication — Amazon Cognito + OIDC](#authentication--amazon-cognito--oidc)
   - [Order Saga Flow](#order-saga-flow)
+  - [MunchGo React SPA](#munchgo-react-spa)
 - [Repository Structure](#repository-structure)
 - [GitOps Pipeline](#gitops-pipeline)
 - [Prerequisites](#prerequisites)
@@ -745,9 +746,37 @@ sequenceDiagram
 
 ---
 
+### MunchGo React SPA
+
+The frontend is a **React 19 + TypeScript** single-page application served from **S3 via CloudFront**. Static assets never touch Kong — only `/api/*` requests are proxied to Kong Cloud Gateway.
+
+| Technology | Version | Purpose |
+|-----------|---------|---------|
+| React | 19 | UI framework |
+| TypeScript | 5.9 | Type safety |
+| Vite | 7.3 | Build tool (fast HMR, ESM-native) |
+| Tailwind CSS | 4.1 | Utility-first styling |
+| React Router | 7.13 | Client-side routing |
+| Axios | 1.13 | HTTP client with auth interceptors |
+
+**CloudFront routing:**
+- `/` → S3 (React SPA `index.html`)
+- `/assets/*` → S3 (hashed JS/CSS with 1-year immutable cache)
+- `/api/*` → Kong Cloud Gateway (API requests, no cache)
+
+**Features:**
+- Cognito authentication (login, register, token refresh, logout)
+- Role-based routing: Customer, Restaurant Owner, Courier, Admin dashboards
+- Typed API client with automatic Bearer token injection and 401 refresh
+- Custom error responses (403/404 → `index.html`) for SPA client-side routing
+
+**Repository:** [`munchgo-spa`](https://github.com/shanaka-versent/munchgo-spa) — deployed via GitHub Actions CI/CD (OIDC → S3 sync → CloudFront invalidation)
+
+---
+
 ## Repository Structure
 
-### Three-Repo GitOps Model
+### Four-Repo GitOps Model
 
 ```mermaid
 graph LR
@@ -770,13 +799,20 @@ graph LR
         CI[GitHub Actions CI<br/>Build → Jib → ECR]
     end
 
+    subgraph spa_repo ["munchgo-spa<br/>(Frontend)"]
+        SPA_SRC[React 19 + TypeScript<br/>Vite + Tailwind CSS]
+        SPA_CI[GitHub Actions CI<br/>Build → S3 → CloudFront]
+    end
+
     CI -->|"kustomize edit set image"| OVL
     ARGO -->|"Points to"| gitops
     ARGO -->|"Deploys"| K8S
+    SPA_CI -->|"aws s3 sync"| TF
 
     style infra fill:#E8E8E8,stroke:#999,color:#333
     style gitops fill:#F0F0F0,stroke:#BBB,color:#333
     style micro fill:#F5F5F5,stroke:#CCC,color:#333
+    style spa_repo fill:#F5F5F5,stroke:#CCC,color:#333
 ```
 
 | Repository | Purpose | Branch |
@@ -784,6 +820,7 @@ graph LR
 | [`Kong-Konnect-Cloud-Gateway-on-EKS`](https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS) | Infrastructure, K8s manifests, ArgoCD, Kong config | `feature/istio-servicemesh` |
 | [`munchgo-k8s-config`](https://github.com/shanaka-versent/munchgo-k8s-config) | GitOps — Kustomize manifests for MunchGo deployments | `main` |
 | [`munchgo-microservices`](https://github.com/shanaka-versent/munchgo-microservices) | Source code — Java 21 Spring Boot microservices + CI | `main` |
+| [`munchgo-spa`](https://github.com/shanaka-versent/munchgo-spa) | React SPA frontend — Cognito auth, role-based UI + CI/CD | `main` |
 
 ### This Repo — Directory Layout
 
@@ -839,7 +876,7 @@ graph LR
     └── modules/
         ├── vpc/                    # VPC, subnets, NAT, IGW
         ├── eks/                    # EKS cluster + system/user node pools
-        ├── iam/                    # LB Controller IRSA + External Secrets IRSA + Cognito Auth IRSA
+        ├── iam/                    # LB Controller IRSA + External Secrets IRSA + Cognito Auth IRSA + GitHub OIDC + SPA Deploy
         ├── lb-controller/          # AWS Load Balancer Controller (Helm)
         ├── argocd/                 # ArgoCD + root app bootstrap
         ├── cloudfront/             # CloudFront + WAF + Origin mTLS
@@ -879,6 +916,28 @@ graph LR
 3. Image is pushed to **Amazon ECR** with the git SHA as the tag
 4. CI updates the **kustomize overlay** in `munchgo-k8s-config` via `kustomize edit set image`
 5. **ArgoCD** detects the change and auto-syncs the new deployment to EKS
+
+### SPA CI/CD Flow
+
+```mermaid
+graph LR
+    DEV2[Developer] -->|git push| SPA_REPO[munchgo-spa<br/>GitHub]
+    SPA_REPO -->|GitHub Actions| BUILD2[Build<br/>npm ci + vite build]
+    BUILD2 -->|aws s3 sync| S3_2[S3 SPA Bucket<br/>index.html + hashed assets]
+    BUILD2 -->|create-invalidation| CF2[CloudFront<br/>Cache Invalidation]
+
+    style DEV2 fill:#fff,stroke:#333,color:#333
+    style SPA_REPO fill:#24292E,color:#fff
+    style BUILD2 fill:#F68D2E,color:#fff
+    style S3_2 fill:#3F8624,color:#fff
+    style CF2 fill:#F68D2E,color:#fff
+```
+
+1. Developer pushes code to `munchgo-spa`
+2. **GitHub Actions** runs `npm ci`, `npm run lint`, `npm run build`
+3. Built assets are uploaded to **S3** via `aws s3 sync` (hashed assets with 1-year cache, `index.html` with no-cache)
+4. **CloudFront cache invalidation** ensures the latest version is served immediately
+5. GitHub Actions authenticates to AWS via **OIDC federation** — no stored AWS credentials
 
 ### ArgoCD Sync Wave Ordering
 

@@ -377,6 +377,7 @@ resource "aws_cloudformation_stack" "cloudfront" {
           PriceClass: !Ref PriceClass
           WebACLId: !If [HasWebACL, !Ref WebACLArn, !Ref "AWS::NoValue"]
           Aliases: !If [HasAlias, [!Ref Aliases], !Ref "AWS::NoValue"]
+          DefaultRootObject: !If [HasS3Origin, "index.html", !Ref "AWS::NoValue"]
 
           Origins:
             - DomainName: !Ref KongDomainName
@@ -397,16 +398,63 @@ resource "aws_cloudformation_stack" "cloudfront" {
                 - - HeaderName: !Ref CfOriginHeaderName
                     HeaderValue: !Ref CfOriginHeaderValue
                 - !Ref "AWS::NoValue"
+            - !If
+              - HasS3Origin
+              - DomainName: !Ref S3BucketDomainName
+                Id: S3SPA
+                S3OriginConfig:
+                  OriginAccessIdentity: ""
+                OriginAccessControlId: !Ref S3OACId
+              - !Ref "AWS::NoValue"
 
-          DefaultCacheBehavior:
-            AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
-            CachedMethods: [GET, HEAD]
-            TargetOriginId: KongCloudGateway
-            CachePolicyId: !Ref CachePolicyId
-            OriginRequestPolicyId: !Ref OriginRequestPolicyId
-            ResponseHeadersPolicyId: !Ref ResponseHeadersPolicyId
-            ViewerProtocolPolicy: redirect-to-https
-            Compress: true
+          # When S3 SPA is enabled:
+          #   Default behavior → S3 (serves React SPA)
+          #   /api/* → Kong Cloud Gateway (API requests)
+          # When S3 SPA is disabled:
+          #   Default behavior → Kong Cloud Gateway (all traffic)
+          DefaultCacheBehavior: !If
+            - HasS3Origin
+            - AllowedMethods: [GET, HEAD, OPTIONS]
+              CachedMethods: [GET, HEAD]
+              TargetOriginId: S3SPA
+              CachePolicyId: !Ref S3CachePolicyId
+              ResponseHeadersPolicyId: !Ref ResponseHeadersPolicyId
+              ViewerProtocolPolicy: redirect-to-https
+              Compress: true
+            - AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+              CachedMethods: [GET, HEAD]
+              TargetOriginId: KongCloudGateway
+              CachePolicyId: !Ref CachePolicyId
+              OriginRequestPolicyId: !Ref OriginRequestPolicyId
+              ResponseHeadersPolicyId: !Ref ResponseHeadersPolicyId
+              ViewerProtocolPolicy: redirect-to-https
+              Compress: true
+
+          CacheBehaviors: !If
+            - HasS3Origin
+            - - PathPattern: "/api/*"
+                AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+                CachedMethods: [GET, HEAD]
+                TargetOriginId: KongCloudGateway
+                CachePolicyId: !Ref CachePolicyId
+                OriginRequestPolicyId: !Ref OriginRequestPolicyId
+                ResponseHeadersPolicyId: !Ref ResponseHeadersPolicyId
+                ViewerProtocolPolicy: redirect-to-https
+                Compress: true
+            - !Ref "AWS::NoValue"
+
+          # SPA routing: return index.html for 403/404 so React Router handles client-side routes
+          CustomErrorResponses: !If
+            - HasS3Origin
+            - - ErrorCode: 403
+                ResponseCode: 200
+                ResponsePagePath: /index.html
+                ErrorCachingMinTTL: 10
+              - ErrorCode: 404
+                ResponseCode: 200
+                ResponsePagePath: /index.html
+                ErrorCachingMinTTL: 10
+            - !Ref "AWS::NoValue"
 
           ViewerCertificate: !If
             - HasAcmCert

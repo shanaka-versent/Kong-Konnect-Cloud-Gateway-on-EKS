@@ -28,6 +28,30 @@ variable "enable_cognito" {
   default     = true
 }
 
+variable "enable_github_oidc" {
+  description = "Create GitHub Actions OIDC provider (set false if one already exists in the account)"
+  type        = bool
+  default     = true
+}
+
+variable "github_oidc_provider_arn" {
+  description = "Existing GitHub OIDC provider ARN (only used when enable_github_oidc = false)"
+  type        = string
+  default     = ""
+}
+
+variable "enable_spa_deploy_role" {
+  description = "Enable SPA deploy IAM role for GitHub Actions"
+  type        = bool
+  default     = true
+}
+
+variable "spa_deploy_github_repos" {
+  description = "GitHub repos allowed to assume the SPA deploy role (org/repo format)"
+  type        = list(string)
+  default     = ["shanaka-versent/munchgo-spa"]
+}
+
 variable "tags" {
   description = "Tags for resources"
   type        = map(string)

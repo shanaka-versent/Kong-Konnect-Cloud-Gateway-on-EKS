@@ -210,6 +210,17 @@ output "cognito_auth_service_role_arn" {
   value       = var.enable_cognito ? module.iam.cognito_auth_service_role_arn : null
 }
 
+# GitHub Actions OIDC
+output "spa_deploy_role_arn" {
+  description = "SPA deploy IAM role ARN — configure as AWS_ROLE_ARN secret in munchgo-spa GitHub repo"
+  value       = module.iam.spa_deploy_role_arn
+}
+
+output "github_oidc_provider_arn" {
+  description = "GitHub Actions OIDC provider ARN"
+  value       = module.iam.github_oidc_provider_arn
+}
+
 # ==============================================================================
 # KONG CLOUD GATEWAY SETUP
 # ==============================================================================
