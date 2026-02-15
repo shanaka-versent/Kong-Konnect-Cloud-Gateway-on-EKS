@@ -133,6 +133,35 @@ output "rds_master_secret_arn" {
   sensitive   = true
 }
 
+output "rds_master_secret_name" {
+  description = "RDS master credentials Secrets Manager name"
+  value       = var.enable_rds ? module.rds[0].master_secret_name : null
+}
+
+output "rds_auth_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["auth"] : null
+}
+
+output "rds_consumers_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["consumers"] : null
+}
+
+output "rds_restaurants_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["restaurants"] : null
+}
+
+output "rds_couriers_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["couriers"] : null
+}
+
+output "rds_orders_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["orders"] : null
+}
+
+output "rds_sagas_db_secret_name" {
+  value = var.enable_rds ? module.rds[0].service_secret_names["sagas"] : null
+}
+
 # S3 SPA
 output "spa_bucket_name" {
   description = "S3 SPA bucket name"
