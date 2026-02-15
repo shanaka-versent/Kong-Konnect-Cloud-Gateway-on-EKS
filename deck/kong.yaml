@@ -14,12 +14,12 @@
 #   by both Kong (L7 plugins) and Istio Gateway (HTTPRoutes) in the cluster.
 #
 # MunchGo API Endpoints:
-#   /api/auth         → Auth Service (public — login, register, token refresh)
-#   /api/consumers    → Consumer Service (Cognito OIDC protected)
-#   /api/restaurants  → Restaurant Service (Cognito OIDC protected)
-#   /api/orders       → Order Service (Cognito OIDC protected, CQRS)
-#   /api/couriers     → Courier Service (Cognito OIDC protected)
-#   /healthz          → Health Responder (platform health check)
+#   /api/v1/auth         → Auth Service (public — login, register, token refresh)
+#   /api/v1/consumers    → Consumer Service (Cognito OIDC protected)
+#   /api/v1/restaurants  → Restaurant Service (Cognito OIDC + anonymous guest browsing)
+#   /api/v1/orders       → Order Service (Cognito OIDC protected, CQRS)
+#   /api/v1/couriers     → Courier Service (Cognito OIDC protected)
+#   /healthz             → Health Responder (platform health check)
 #
 # Authentication (Amazon Cognito + Kong OpenID Connect):
 #   Auth Service registers users in Cognito and returns Cognito tokens.
@@ -91,7 +91,7 @@ services:
     routes:
       - name: auth-route
         paths:
-          - /api/auth
+          - /api/v1/auth
         strip_path: false
         protocols:
           - https
@@ -132,7 +132,7 @@ services:
     routes:
       - name: consumers-route
         paths:
-          - /api/consumers
+          - /api/v1/consumers
         strip_path: false
         protocols:
           - https
@@ -182,8 +182,10 @@ services:
               - "X-Request-Source: cloud-gateway"
 
   # --------------------------------------------------------------------------
-  # Restaurant Service — Cognito OIDC Protected
+  # Restaurant Service — Cognito OIDC with anonymous fallback (guest browsing)
   # --------------------------------------------------------------------------
+  # Anonymous consumer allows unauthenticated GET requests (menu browsing).
+  # Authenticated requests still get user claims forwarded as headers.
   - name: munchgo-restaurants
     url: http://k8s-istioing-kongclou-3a1d5dfc84-544b8b2eb42eaed2.elb.ap-southeast-2.amazonaws.com:80
     protocol: http
@@ -191,7 +193,7 @@ services:
     routes:
       - name: restaurants-route
         paths:
-          - /api/restaurants
+          - /api/v1/restaurants
         strip_path: false
         protocols:
           - https
@@ -205,6 +207,7 @@ services:
           bearer_token_param_type:
             - header
           cache_ttl: 300
+          anonymous: anonymous
           upstream_headers_claims:
             - sub
             - email
@@ -250,7 +253,7 @@ services:
     routes:
       - name: orders-route
         paths:
-          - /api/orders
+          - /api/v1/orders
         strip_path: false
         protocols:
           - https
@@ -309,7 +312,7 @@ services:
     routes:
       - name: couriers-route
         paths:
-          - /api/couriers
+          - /api/v1/couriers
         strip_path: false
         protocols:
           - https
@@ -375,10 +378,19 @@ services:
           - http
 
 # ==============================================================================
-# NOTE: No consumers section needed.
+# CONSUMERS — Anonymous consumer for guest browsing
 # ==============================================================================
-# With the openid-connect plugin, Kong auto-discovers Cognito's JWKS endpoint
-# for token signature verification. No manual RSA public key management.
+# The anonymous consumer allows unauthenticated users to browse restaurants
+# and menus without logging in, matching the monolith behaviour.
+# The OIDC plugin on the restaurants service falls back to this consumer
+# when no bearer token is provided.
+
+consumers:
+  - username: anonymous
+
+# ==============================================================================
+# NOTE: With the openid-connect plugin, Kong auto-discovers Cognito's JWKS
+# endpoint for token signature verification. No manual RSA public key management.
 # Cognito handles key rotation automatically.
 #
 # After Cognito Terraform apply, update the issuer URLs above:
