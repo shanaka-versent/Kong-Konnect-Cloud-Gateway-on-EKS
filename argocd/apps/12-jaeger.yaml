@@ -42,7 +42,7 @@ spec:
         allInOne:
           enabled: true
           image:
-            tag: "1.62"
+            tag: "1.76.0"
           extraEnv:
             - name: COLLECTOR_OTLP_ENABLED
               value: "true"

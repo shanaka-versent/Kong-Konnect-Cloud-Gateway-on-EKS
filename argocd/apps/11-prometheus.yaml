@@ -55,13 +55,7 @@ spec:
             serviceMonitorSelectorNilUsesHelmValues: false
             podMonitorSelectorNilUsesHelmValues: false
             retention: 7d
-            storageSpec:
-              volumeClaimTemplate:
-                spec:
-                  accessModes: ["ReadWriteOnce"]
-                  resources:
-                    requests:
-                      storage: 20Gi
+            storageSpec: {}  # In-memory for POC (use PVC in production)
             tolerations:
               - key: CriticalAddonsOnly
                 operator: Exists
