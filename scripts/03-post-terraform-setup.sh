@@ -6,10 +6,10 @@
 # (Istio Gateway created the internal NLB).
 #
 # What it does:
-#   1. Reads Terraform outputs (VPC ID, Transit Gateway ID)
+#   1. Reads Terraform outputs (VPC, TGW, Cognito, RDS secrets)
 #   2. Waits for the Istio Gateway NLB to be provisioned
-#   3. Displays the single NLB endpoint for Konnect service configuration
-#   4. Shows Transit Gateway setup instructions
+#   3. Auto-populates ALL placeholders in kong.yaml, ExternalSecrets, and K8s overlays
+#   4. Shows the deck gateway sync command and access URL
 #
 # Usage:
 #   ./scripts/03-post-terraform-setup.sh
@@ -19,6 +19,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 TERRAFORM_DIR="${REPO_DIR}/terraform"
+
+# K8s config repo (relative to infra repo)
+K8S_CONFIG_REPO="${REPO_DIR}/../../../Modernisation/Java-demo/munchgo-k8s-config"
 
 # Auto-source .env if it exists (contains KONNECT_TOKEN etc.)
 ENV_FILE="${REPO_DIR}/.env"
@@ -40,7 +43,7 @@ error(){ echo -e "${RED}[ERROR]${NC} $*"; }
 info() { echo -e "${CYAN}[CONFIG]${NC} $*"; }
 
 # ---------------------------------------------------------------------------
-# Read Terraform outputs
+# Read all Terraform outputs
 # ---------------------------------------------------------------------------
 read_terraform_outputs() {
     log "Reading Terraform outputs..."
@@ -51,15 +54,41 @@ read_terraform_outputs() {
     VPC_CIDR=$(terraform output -raw vpc_cidr 2>/dev/null || echo "N/A")
     TRANSIT_GW_ID=$(terraform output -raw transit_gateway_id 2>/dev/null || echo "N/A")
     RAM_SHARE_ARN=$(terraform output -raw ram_share_arn 2>/dev/null || echo "N/A")
+    NAME_PREFIX=$(terraform output -raw name_prefix 2>/dev/null || echo "N/A")
+
+    # Cognito outputs
+    COGNITO_ISSUER_URL=$(terraform output -raw cognito_issuer_url 2>/dev/null || echo "")
+    COGNITO_SECRET_NAME=$(terraform output -raw cognito_secret_name 2>/dev/null || echo "")
+    COGNITO_AUTH_ROLE_ARN=$(terraform output -raw cognito_auth_service_role_arn 2>/dev/null || echo "")
+
+    # RDS secret names
+    RDS_MASTER_SECRET=$(terraform output -raw rds_master_secret_name 2>/dev/null || echo "")
+    RDS_AUTH_SECRET=$(terraform output -raw rds_auth_db_secret_name 2>/dev/null || echo "")
+    RDS_CONSUMERS_SECRET=$(terraform output -raw rds_consumers_db_secret_name 2>/dev/null || echo "")
+    RDS_RESTAURANTS_SECRET=$(terraform output -raw rds_restaurants_db_secret_name 2>/dev/null || echo "")
+    RDS_COURIERS_SECRET=$(terraform output -raw rds_couriers_db_secret_name 2>/dev/null || echo "")
+    RDS_ORDERS_SECRET=$(terraform output -raw rds_orders_db_secret_name 2>/dev/null || echo "")
+    RDS_SAGAS_SECRET=$(terraform output -raw rds_sagas_db_secret_name 2>/dev/null || echo "")
+
+    # CloudFront URL
+    APP_URL=$(terraform output -raw application_url 2>/dev/null || echo "")
 
     cd "$REPO_DIR"
 
     echo ""
-    log "Infrastructure Details:"
-    echo "  VPC ID:              $VPC_ID"
-    echo "  VPC CIDR:            $VPC_CIDR"
-    echo "  Transit Gateway ID:  $TRANSIT_GW_ID"
-    echo "  RAM Share ARN:       $RAM_SHARE_ARN"
+    log "Infrastructure:"
+    echo "  VPC:           $VPC_ID ($VPC_CIDR)"
+    echo "  Transit GW:    $TRANSIT_GW_ID"
+    echo "  Name Prefix:   $NAME_PREFIX"
+    echo ""
+    log "Cognito:"
+    echo "  Issuer URL:    $COGNITO_ISSUER_URL"
+    echo "  Secret Name:   $COGNITO_SECRET_NAME"
+    echo "  Auth Role ARN: $COGNITO_AUTH_ROLE_ARN"
+    echo ""
+    if [[ -n "$APP_URL" ]]; then
+        log "Application URL: $APP_URL"
+    fi
     echo ""
 }
 
@@ -68,9 +97,7 @@ read_terraform_outputs() {
 # ---------------------------------------------------------------------------
 get_gateway_endpoint() {
     log "Fetching Istio Gateway NLB endpoint..."
-    echo ""
 
-    # Wait for Gateway to be ready
     for i in {1..30}; do
         GATEWAY_STATUS=$(kubectl get gateway -n istio-ingress kong-cloud-gw-gateway -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null) || true
         if [ "$GATEWAY_STATUS" = "True" ]; then
@@ -80,77 +107,125 @@ get_gateway_endpoint() {
         if [ $i -eq 30 ]; then
             warn "Timeout waiting for Gateway. It may still be provisioning."
             warn "Check: kubectl get gateway -n istio-ingress"
+            NLB_HOSTNAME="PENDING"
             return
         fi
         echo -n "."
         sleep 10
     done
 
-    NLB_HOSTNAME=$(kubectl get gateway -n istio-ingress kong-cloud-gw-gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "pending")
-
-    echo ""
-    echo "=========================================="
-    echo "  Istio Gateway NLB Endpoint"
-    echo "=========================================="
-    echo ""
-    echo "  NLB DNS: ${NLB_HOSTNAME}"
-    echo ""
-    echo "  This is the SINGLE entry point for all Kong Cloud Gateway traffic."
-    echo "  All services in deck/kong.yaml should use this NLB hostname."
-    echo ""
+    NLB_HOSTNAME=$(kubectl get gateway -n istio-ingress kong-cloud-gw-gateway -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "PENDING")
+    log "NLB Endpoint: ${NLB_HOSTNAME}"
 }
 
 # ---------------------------------------------------------------------------
-# Show Konnect configuration instructions
+# Populate kong.yaml placeholders
 # ---------------------------------------------------------------------------
-show_konnect_config() {
-    echo ""
-    echo "=========================================="
-    echo "  Konnect Service Configuration"
-    echo "=========================================="
-    echo ""
-    echo "Update ALL service URLs in deck/kong.yaml with the Istio Gateway NLB:"
-    echo ""
-    echo "  services:"
-    echo "    - name: users-api"
-    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
-    echo "    - name: tenant-app1"
-    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
-    echo "    - name: tenant-app2"
-    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
-    echo "    - name: gateway-health"
-    echo "      url: http://${NLB_HOSTNAME:-<istio-gateway-nlb-dns>}:80"
-    echo ""
-    echo "Then sync to Konnect:"
-    echo "  deck gateway sync -s deck/kong.yaml \\"
-    echo "    --konnect-addr https://\${KONNECT_REGION}.api.konghq.com \\"
-    echo "    --konnect-token \$KONNECT_TOKEN \\"
-    echo "    --konnect-control-plane-name kong-cloud-gateway-eks"
-    echo ""
+populate_kong_yaml() {
+    local KONG_FILE="${REPO_DIR}/deck/kong.yaml"
+
+    if [[ ! -f "$KONG_FILE" ]]; then
+        warn "deck/kong.yaml not found, skipping"
+        return
+    fi
+
+    log "Populating deck/kong.yaml placeholders..."
+
+    if [[ "$NLB_HOSTNAME" != "PENDING" ]]; then
+        sed -i.bak "s|PLACEHOLDER_NLB_DNS|${NLB_HOSTNAME}|g" "$KONG_FILE"
+        info "  Replaced PLACEHOLDER_NLB_DNS → ${NLB_HOSTNAME}"
+    else
+        warn "  NLB not ready — PLACEHOLDER_NLB_DNS not replaced"
+    fi
+
+    if [[ -n "$COGNITO_ISSUER_URL" ]]; then
+        sed -i.bak "s|PLACEHOLDER_COGNITO_ISSUER_URL|${COGNITO_ISSUER_URL}|g" "$KONG_FILE"
+        info "  Replaced PLACEHOLDER_COGNITO_ISSUER_URL → ${COGNITO_ISSUER_URL}"
+    else
+        warn "  Cognito not enabled — PLACEHOLDER_COGNITO_ISSUER_URL not replaced"
+    fi
+
+    rm -f "${KONG_FILE}.bak"
 }
 
 # ---------------------------------------------------------------------------
-# Show Transit Gateway instructions
+# Populate ExternalSecret placeholders
 # ---------------------------------------------------------------------------
-show_transit_gw_instructions() {
+populate_external_secrets() {
+    log "Populating ExternalSecret placeholders..."
+
+    # Cognito ExternalSecret
+    local COGNITO_ES="${REPO_DIR}/k8s/external-secrets/munchgo-cognito-secret.yaml"
+    if [[ -f "$COGNITO_ES" && -n "$COGNITO_SECRET_NAME" ]]; then
+        sed -i.bak "s|PLACEHOLDER-munchgo-cognito|${COGNITO_SECRET_NAME}|g" "$COGNITO_ES"
+        info "  Cognito secret: ${COGNITO_SECRET_NAME}"
+        rm -f "${COGNITO_ES}.bak"
+    fi
+
+    # DB ExternalSecrets
+    local DB_ES="${REPO_DIR}/k8s/external-secrets/munchgo-db-secret.yaml"
+    if [[ -f "$DB_ES" ]]; then
+        [[ -n "$RDS_MASTER_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-rds-master|${RDS_MASTER_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_AUTH_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-auth-db|${RDS_AUTH_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_CONSUMERS_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-consumers-db|${RDS_CONSUMERS_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_RESTAURANTS_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-restaurants-db|${RDS_RESTAURANTS_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_COURIERS_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-couriers-db|${RDS_COURIERS_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_ORDERS_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-orders-db|${RDS_ORDERS_SECRET}|g" "$DB_ES"
+        [[ -n "$RDS_SAGAS_SECRET" ]] && sed -i.bak "s|PLACEHOLDER-munchgo-sagas-db|${RDS_SAGAS_SECRET}|g" "$DB_ES"
+        info "  DB secrets populated"
+        rm -f "${DB_ES}.bak"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Populate K8s config overlay (IRSA role ARN)
+# ---------------------------------------------------------------------------
+populate_k8s_overlay() {
+    if [[ ! -d "$K8S_CONFIG_REPO" ]]; then
+        warn "munchgo-k8s-config repo not found at ${K8S_CONFIG_REPO}, skipping IRSA patch"
+        return
+    fi
+
+    local AUTH_OVERLAY="${K8S_CONFIG_REPO}/overlays/dev/auth-service/kustomization.yaml"
+    if [[ -f "$AUTH_OVERLAY" && -n "$COGNITO_AUTH_ROLE_ARN" ]]; then
+        log "Populating IRSA role ARN in K8s overlay..."
+        sed -i.bak "s|COGNITO_AUTH_SERVICE_ROLE_ARN|${COGNITO_AUTH_ROLE_ARN}|g" "$AUTH_OVERLAY"
+        info "  auth-service IRSA → ${COGNITO_AUTH_ROLE_ARN}"
+        rm -f "${AUTH_OVERLAY}.bak"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Show next steps
+# ---------------------------------------------------------------------------
+show_next_steps() {
     echo ""
     echo "=========================================="
-    echo "  Transit Gateway Setup"
+    echo "  Next Steps"
     echo "=========================================="
     echo ""
-    echo "To connect Kong Cloud Gateway to the Istio Gateway NLB:"
+    echo "  1. Sync Kong configuration:"
+    echo "     deck gateway sync deck/kong.yaml \\"
+    echo "       --konnect-addr https://\${KONNECT_REGION}.api.konghq.com \\"
+    echo "       --konnect-token \$KONNECT_TOKEN \\"
+    echo "       --konnect-control-plane-name \$KONNECT_CONTROL_PLANE_NAME"
     echo ""
-    echo "  1. Set up Konnect Cloud Gateway:"
-    echo "     ./scripts/02-setup-cloud-gateway.sh"
-    echo "     (Handles RAM sharing, network provisioning, and TGW attachment automatically)"
+    echo "  2. Commit the populated config files:"
+    echo "     git add deck/kong.yaml k8s/external-secrets/"
+    echo "     git commit -m 'Populate deployment placeholders from terraform outputs'"
     echo ""
-    echo "  2. VPC route tables are auto-configured by Terraform:"
-    echo "     Route: 192.168.0.0/16 -> Transit Gateway (${TRANSIT_GW_ID:-tgw-xxx})"
+    echo "  3. Generate a test token:"
+    echo "     ./scripts/02-generate-jwt.sh"
     echo ""
-    echo "  3. Security Groups are auto-configured by Terraform:"
-    echo "     Allow inbound from 192.168.0.0/16 (Kong Cloud GW CIDR)"
-    echo ""
-    echo "  Note: TGW attachment is auto-accepted (auto_accept_shared_attachments enabled)"
+    echo "  4. Test the API:"
+    if [[ -n "$APP_URL" ]]; then
+        echo "     curl ${APP_URL}/healthz"
+        echo "     curl ${APP_URL}/api/auth/health"
+        echo "     curl -H 'Authorization: Bearer \$ACCESS_TOKEN' ${APP_URL}/api/orders"
+    else
+        echo "     curl \$APP_URL/healthz"
+        echo "     (Deploy CloudFront in Step 7 to get the application URL)"
+    fi
     echo ""
 }
 
@@ -160,15 +235,17 @@ show_transit_gw_instructions() {
 main() {
     echo ""
     echo "=============================================="
-    echo "  Post-Terraform Setup -- Kong Cloud Gateway"
-    echo "  with Istio Gateway (K8s Gateway API)"
+    echo "  Post-Terraform Setup — Kong Cloud Gateway"
+    echo "  Placeholder Auto-Population"
     echo "=============================================="
     echo ""
 
     read_terraform_outputs
     get_gateway_endpoint
-    show_konnect_config
-    show_transit_gw_instructions
+    populate_kong_yaml
+    populate_external_secrets
+    populate_k8s_overlay
+    show_next_steps
 }
 
 main "$@"

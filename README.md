@@ -1,6 +1,6 @@
-# Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)
+# Kong Dedicated Cloud Gateway on EKS — MunchGo Microservices Platform
 
-Kong Konnect Dedicated Cloud Gateway with backend services on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with JWT auth, rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed.
+Kong Konnect Dedicated Cloud Gateway with **MunchGo microservices** on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with **Amazon Cognito** authentication (OpenID Connect), rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. L7 observability via **waypoint proxies**.
 
 **CloudFront + WAF** is mandatory — Kong Cloud Gateway has a public-facing NLB that must be protected. All client traffic passes through CloudFront for WAF inspection (DDoS, SQLi/XSS, rate limiting, geo-blocking) before reaching Kong. Origin mTLS prevents direct access to Kong Cloud Gateway, ensuring nobody can bypass WAF.
 
@@ -8,41 +8,67 @@ The entire stack deploys with **zero manual steps** — Terraform provisions inf
 
 ---
 
+## Table of Contents
+
+- [Architecture](#architecture)
+  - [Istio Ambient Service Mesh](#istio-ambient-service-mesh)
+  - [East-West Traffic](#east-west-traffic--how-services-communicate)
+- [MunchGo Microservices](#munchgo-microservices)
+  - [Authentication — Amazon Cognito + OIDC](#authentication--amazon-cognito--oidc)
+  - [Order Saga Flow](#order-saga-flow)
+- [Repository Structure](#repository-structure)
+- [GitOps Pipeline](#gitops-pipeline)
+- [Prerequisites](#prerequisites)
+- [Deployment](#deployment)
+- [Verification](#verification)
+- [Observability](#observability)
+- [Konnect UI](#konnect-ui)
+- [Teardown](#teardown)
+- [Appendix](#appendix)
+
+---
+
 ## Architecture
 
-Two AWS accounts are involved. Traffic never touches the public internet between Kong and EKS.
+### High-Level Overview
+
+Two AWS accounts are involved. Traffic never touches the public internet between Kong and EKS. MunchGo microservices communicate east-west via Istio Ambient mTLS and north-south through Kong Cloud Gateway.
 
 ```mermaid
 graph TB
-    Client([Client])
+    Client([Client / SPA])
     CF[CloudFront + WAF<br/>Edge Security + Origin mTLS]
 
     subgraph kong_acct ["Kong's AWS Account (192.168.0.0/16)"]
-        Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>JWT · Rate Limit · CORS · Analytics]
+        Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>OIDC (Cognito) · Rate Limit · CORS · Analytics]
     end
 
-    TGW{{AWS Transit Gateway}}
+    TGW{{AWS Transit Gateway<br/>Private AWS Backbone}}
 
     subgraph your_acct ["Your AWS Account (10.0.0.0/16)"]
         subgraph eks_cluster [EKS Cluster]
             subgraph ns_istio_ing [istio-ingress]
                 NLB[Internal NLB]
                 IGW[Istio Gateway<br/>K8s Gateway API]
-                HR1[/HTTPRoute /healthz/]
-                HR2[/HTTPRoute /app1/]
-                HR3[/HTTPRoute /app2/]
-                HR4[/HTTPRoute /api/users/]
+            end
+            subgraph ns_munchgo [munchgo namespace — Istio Ambient + Waypoint]
+                AUTH[auth-service<br/>Cognito facade]
+                CONSUMER[consumer-service]
+                RESTAURANT[restaurant-service]
+                ORDER[order-service<br/>CQRS + Events]
+                COURIER[courier-service]
+                SAGA[saga-orchestrator<br/>Saga Pattern]
             end
             subgraph ns_gw_health [gateway-health]
-                Health[health-responder<br/>ClusterIP]
+                Health[health-responder]
             end
-            subgraph ns_sample [sample-apps]
-                App1[sample-app-1<br/>ClusterIP]
-                App2[sample-app-2<br/>ClusterIP]
-            end
-            subgraph ns_api [api-services]
-                API[users-api<br/>ClusterIP]
-            end
+        end
+        subgraph data_services [Managed AWS Data Services]
+            COGNITO[Amazon Cognito<br/>User Pool + OIDC]
+            MSK[Amazon MSK<br/>Kafka 3.6.0]
+            RDS[(Amazon RDS<br/>PostgreSQL 16<br/>6 Databases)]
+            ECR[Amazon ECR<br/>6 Repositories]
+            S3[S3 + CloudFront<br/>React SPA]
         end
     end
 
@@ -50,32 +76,47 @@ graph TB
     CF -->|HTTPS + Origin mTLS| Kong
     Kong -->|HTTPS via TGW| TGW
     TGW --> NLB
-    NLB -->|TLS Terminate| IGW
-    IGW --> HR1
-    IGW --> HR2
-    IGW --> HR3
-    IGW --> HR4
-    HR1 --> Health
-    HR2 --> App1
-    HR3 --> App2
-    HR4 --> API
+    NLB --> IGW
+    IGW -->|HTTPRoute /api/auth| AUTH
+    IGW -->|HTTPRoute /api/consumers| CONSUMER
+    IGW -->|HTTPRoute /api/restaurants| RESTAURANT
+    IGW -->|HTTPRoute /api/orders| ORDER
+    IGW -->|HTTPRoute /api/couriers| COURIER
+
+    AUTH -.->|Cognito Admin API| COGNITO
+    AUTH -.->|Kafka Events| MSK
+    ORDER -.->|Kafka Events| MSK
+    SAGA -.->|Kafka Orchestration| MSK
+    AUTH -.->|JDBC| RDS
+    CONSUMER -.->|JDBC| RDS
+    RESTAURANT -.->|JDBC| RDS
+    ORDER -.->|JDBC| RDS
+    COURIER -.->|JDBC| RDS
+    SAGA -.->|JDBC| RDS
 
     style Kong fill:#003459,color:#fff
     style IGW fill:#466BB0,color:#fff
     style CF fill:#F68D2E,color:#fff
     style TGW fill:#232F3E,color:#fff
     style NLB fill:#232F3E,color:#fff
-    style HR1 fill:#7B68EE,color:#fff
-    style HR2 fill:#7B68EE,color:#fff
-    style HR3 fill:#7B68EE,color:#fff
-    style HR4 fill:#7B68EE,color:#fff
+    style MSK fill:#FF9900,color:#fff
+    style RDS fill:#3B48CC,color:#fff
+    style ECR fill:#FF9900,color:#fff
+    style COGNITO fill:#DD344C,color:#fff
+    style S3 fill:#3F8624,color:#fff
+    style AUTH fill:#2E8B57,color:#fff
+    style CONSUMER fill:#2E8B57,color:#fff
+    style RESTAURANT fill:#2E8B57,color:#fff
+    style ORDER fill:#2E8B57,color:#fff
+    style COURIER fill:#2E8B57,color:#fff
+    style SAGA fill:#8B0000,color:#fff
     style kong_acct fill:#E8E8E8,stroke:#999,color:#333
     style your_acct fill:#E8E8E8,stroke:#999,color:#333
     style eks_cluster fill:#F0F0F0,stroke:#BBB,color:#333
+    style data_services fill:#F0F0F0,stroke:#BBB,color:#333
     style ns_istio_ing fill:#F5F5F5,stroke:#CCC,color:#333
+    style ns_munchgo fill:#F5F5F5,stroke:#CCC,color:#333
     style ns_gw_health fill:#F5F5F5,stroke:#CCC,color:#333
-    style ns_sample fill:#F5F5F5,stroke:#CCC,color:#333
-    style ns_api fill:#F5F5F5,stroke:#CCC,color:#333
 ```
 
 ### End-to-End Encryption
@@ -84,11 +125,11 @@ TLS terminates and re-encrypts at each trust boundary. Traffic is encrypted at e
 
 ```mermaid
 graph LR
-    C([Client]) -->|"🔒 TLS 1.3"| CF
-    CF[CloudFront<br/>+ WAF] -->|"🔒 HTTPS +<br/>Origin mTLS cert"| Kong
-    Kong[Kong Cloud<br/>Gateway] -->|"🔒 HTTPS<br/>via Transit GW"| NLB[Internal<br/>NLB]
-    NLB -->|"🔒 TLS"| IGW[Istio Gateway<br/>TLS Terminate]
-    IGW -->|"🔒 mTLS<br/>ztunnel L4"| Pod[Backend<br/>Pod]
+    C([Client]) -->|"TLS 1.3"| CF
+    CF[CloudFront<br/>+ WAF] -->|"HTTPS +<br/>Origin mTLS cert"| Kong
+    Kong[Kong Cloud<br/>Gateway] -->|"HTTPS<br/>via Transit GW"| NLB[Internal<br/>NLB]
+    NLB -->|"TLS"| IGW[Istio Gateway<br/>TLS Terminate]
+    IGW -->|"mTLS<br/>ztunnel L4"| Pod[MunchGo<br/>Service]
 
     style C fill:#fff,stroke:#333,color:#333
     style CF fill:#F68D2E,color:#fff
@@ -106,43 +147,188 @@ graph LR
 | NLB → Istio Gateway | TLS | TLS passthrough (NLB L4) | Istio Gateway (port 443) |
 | Istio Gateway → Pod | HTTP | Istio Ambient mTLS (ztunnel L4) | Backend pod |
 
-> The Istio Gateway listens on port 80 (HTTP) and port 443 (HTTPS with `tls.mode: Terminate`). Kong connects on port 443 for end-to-end encryption. The `istio-gateway-tls` secret is created automatically by `./scripts/01-generate-certs.sh`.
-
 ### Traffic Flow
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant CF as CloudFront<br/>(+ WAF)
+    participant C as Client / SPA
+    participant CF as CloudFront + WAF
     participant K as Kong Cloud GW<br/>(Kong's AWS Account)
     participant TGW as Transit Gateway
-    participant NLB as Internal NLB<br/>(Private)
-    participant IG as Istio Gateway<br/>(Pod)
-    participant App as Backend App<br/>(Pod)
+    participant NLB as Internal NLB
+    participant IG as Istio Gateway
+    participant WP as Waypoint Proxy<br/>(L7 AuthZ)
+    participant App as MunchGo Service
 
     Note over C,CF: TLS Session 1 (Edge)
-    C->>+CF: HTTPS :443<br/>TLS 1.3 (AWS-managed cert)
-    CF->>CF: TLS Termination<br/>WAF Inspection
+    C->>+CF: HTTPS :443
+    CF->>CF: WAF Inspection<br/>DDoS/SQLi/XSS/Rate Limit
 
     Note over CF,K: TLS Session 2 (Origin mTLS)
-    CF->>+K: HTTPS :443<br/>Origin mTLS client certificate
-    K->>K: TLS Termination<br/>JWT Auth, Rate Limiting,<br/>CORS, Request Transform
+    CF->>+K: HTTPS + Client mTLS
+    K->>K: OIDC Token Validation (Cognito JWKS)<br/>Rate Limiting · CORS
 
     Note over K,IG: TLS Session 3 (Backend)
-    K->>+TGW: HTTPS :443<br/>Re-encrypted (private network)
-    TGW->>+NLB: HTTPS :443<br/>AWS backbone (192.168.0.0/16 ↔ 10.0.0.0/16)
-    NLB->>+IG: HTTPS :443<br/>TLS Passthrough (L4)
-    IG->>IG: TLS Termination<br/>(istio-gateway-tls secret)
+    K->>+TGW: HTTPS via Private Backbone
+    TGW->>+NLB: L4 Forward
+    NLB->>+IG: TLS Terminate
 
-    Note over IG,App: Plain HTTP (mTLS via Ambient)
-    IG->>+App: HTTP :8080<br/>Istio Ambient mTLS (ztunnel L4)
-    App-->>-IG: Response
+    Note over IG,App: Istio Ambient Mesh
+    IG->>+WP: L7 Authorization
+    WP->>+App: mTLS (ztunnel)
+    App-->>-WP: Response
+    WP-->>-IG: Response
     IG-->>-NLB: Response
     NLB-->>-TGW: Response
     TGW-->>-K: Response
     K-->>-CF: Response
     CF-->>-C: HTTPS Response
 ```
+
+### Istio Ambient Service Mesh
+
+MunchGo uses **Istio Ambient Mesh** — zero sidecar containers. L4 mTLS is handled by **ztunnel** (DaemonSet on every node). L7 policies are enforced by a **waypoint proxy** per namespace.
+
+```mermaid
+graph TB
+    subgraph mesh ["Istio Ambient Mesh (munchgo namespace)"]
+        subgraph l4 ["L4: ztunnel (automatic mTLS)"]
+            AUTH2[auth-service]
+            CONSUMER2[consumer-service]
+            RESTAURANT2[restaurant-service]
+            ORDER2[order-service]
+            COURIER2[courier-service]
+            SAGA2[saga-orchestrator]
+        end
+
+        WP2[Waypoint Proxy<br/>L7 Authorization + Telemetry<br/>gatewayClassName: istio-waypoint]
+    end
+
+    subgraph control ["Istio Control Plane (istio-system)"]
+        ISTIOD[istiod<br/>Config Distribution]
+        CNI[istio-cni<br/>Network Rules]
+        ZT[ztunnel<br/>L4 mTLS DaemonSet]
+    end
+
+    ISTIOD -->|xDS Config| WP2
+    ISTIOD -->|xDS Config| ZT
+    ZT -->|Transparent mTLS| AUTH2
+    ZT -->|Transparent mTLS| CONSUMER2
+    ZT -->|Transparent mTLS| RESTAURANT2
+    ZT -->|Transparent mTLS| ORDER2
+    ZT -->|Transparent mTLS| COURIER2
+    ZT -->|Transparent mTLS| SAGA2
+    WP2 -->|AuthZ Policy| ORDER2
+    WP2 -->|AuthZ Policy| SAGA2
+
+    style WP2 fill:#466BB0,color:#fff
+    style ISTIOD fill:#466BB0,color:#fff
+    style ZT fill:#466BB0,color:#fff
+    style CNI fill:#466BB0,color:#fff
+    style AUTH2 fill:#2E8B57,color:#fff
+    style CONSUMER2 fill:#2E8B57,color:#fff
+    style RESTAURANT2 fill:#2E8B57,color:#fff
+    style ORDER2 fill:#2E8B57,color:#fff
+    style COURIER2 fill:#2E8B57,color:#fff
+    style SAGA2 fill:#8B0000,color:#fff
+    style mesh fill:#F0F0F0,stroke:#BBB,color:#333
+    style control fill:#F5F5F5,stroke:#CCC,color:#333
+    style l4 fill:#FAFAFA,stroke:#DDD,color:#333
+```
+
+| Component | Role | Scope |
+|-----------|------|-------|
+| **ztunnel** | L4 mTLS proxy (DaemonSet) | Automatic — encrypts all pod-to-pod traffic |
+| **Waypoint** | L7 proxy (per namespace) | AuthorizationPolicy, telemetry, traffic management |
+| **PeerAuthentication** | mTLS mode | `STRICT` — all traffic must be mTLS |
+| **AuthorizationPolicy** | Access control | Restricts saga-orchestrator, allows gateway ingress |
+| **Telemetry** | Observability | Jaeger tracing (100%), Prometheus metrics, access logs |
+
+### East-West Traffic — How Services Communicate
+
+MunchGo uses a **hybrid communication model**: synchronous HTTP calls for saga orchestration (protected by Istio mTLS) and asynchronous Kafka events for domain events (via external MSK).
+
+**Only the Saga Orchestrator makes direct HTTP calls to other services.** All other services communicate exclusively via Kafka. Istio authorization policies enforce this — even though all services have ClusterIP endpoints, only authorized sources can reach them.
+
+```mermaid
+graph TB
+    subgraph mesh_ew ["munchgo namespace — Istio Ambient mTLS"]
+        SAGA_EW[saga-orchestrator]
+        CONSUMER_EW[consumer-service]
+        RESTAURANT_EW[restaurant-service]
+        ORDER_EW[order-service]
+        COURIER_EW[courier-service]
+        AUTH_EW[auth-service]
+    end
+
+    subgraph external_ew ["External (outside mesh)"]
+        KAFKA_EW[Amazon MSK<br/>Kafka]
+    end
+
+    SAGA_EW -->|"HTTP GET /api/v1/consumers/{id}<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| CONSUMER_EW
+    SAGA_EW -->|"HTTP GET /api/v1/restaurants/{id}<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| RESTAURANT_EW
+    SAGA_EW -->|"HTTP POST /api/v1/orders<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| ORDER_EW
+
+    SAGA_EW -.->|"Kafka: saga-commands<br/>(assign courier)"| KAFKA_EW
+    KAFKA_EW -.->|"Kafka: saga-replies<br/>(courier assigned)"| SAGA_EW
+    AUTH_EW -.->|"Kafka: user-events<br/>(user registered)"| KAFKA_EW
+    KAFKA_EW -.->|"Kafka: user-events"| CONSUMER_EW
+    KAFKA_EW -.->|"Kafka: user-events"| COURIER_EW
+
+    style SAGA_EW fill:#8B0000,color:#fff
+    style AUTH_EW fill:#2E8B57,color:#fff
+    style CONSUMER_EW fill:#2E8B57,color:#fff
+    style RESTAURANT_EW fill:#2E8B57,color:#fff
+    style ORDER_EW fill:#2E8B57,color:#fff
+    style COURIER_EW fill:#2E8B57,color:#fff
+    style KAFKA_EW fill:#FF9900,color:#fff
+    style mesh_ew fill:#F0F0F0,stroke:#BBB,color:#333
+    style external_ew fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+**Solid arrows** = synchronous HTTP (encrypted by Istio ztunnel mTLS, authorized by waypoint L7 policy).
+**Dashed arrows** = asynchronous Kafka (external to mesh, via Amazon MSK).
+
+#### Service Communication Matrix
+
+| Source | Target | Protocol | Path / Topic | Istio mTLS? |
+|--------|--------|----------|-------------|-------------|
+| **Saga Orchestrator** | Consumer Service | HTTP GET | `/api/v1/consumers/{id}` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Restaurant Service | HTTP GET | `/api/v1/restaurants/{id}` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Order Service | HTTP POST/PUT | `/api/v1/orders`, `/api/v1/orders/{id}/approve` | Yes (ztunnel + waypoint) |
+| **Saga Orchestrator** | Courier Service | Kafka | `saga-commands` topic | No (external MSK) |
+| Courier Service | Saga Orchestrator | Kafka | `saga-replies` topic | No (external MSK) |
+| Auth Service | Consumer Service | Kafka | `user-events` topic | No (external MSK) |
+| Auth Service | Courier Service | Kafka | `user-events` topic | No (external MSK) |
+| Istio Gateway | All services | HTTP | HTTPRoute path-based routing | Yes (ztunnel) |
+
+#### How ztunnel and Waypoint Handle East-West Traffic
+
+When the Saga Orchestrator calls the Consumer Service via HTTP:
+
+```
+Saga Pod → ztunnel (mTLS encrypt) → Waypoint (L7 AuthZ check) → ztunnel (mTLS decrypt) → Consumer Pod
+```
+
+1. **ztunnel** on the source node intercepts outbound traffic and encrypts it with mTLS (SPIFFE identity)
+2. **Waypoint proxy** receives the encrypted traffic, terminates mTLS, and enforces L7 authorization policies (checking that the source service account is `munchgo-order-saga-orchestrator`)
+3. **ztunnel** on the destination node re-encrypts and delivers to the Consumer pod
+4. The **waypoint** also emits L7 telemetry: Jaeger traces, Prometheus request metrics, and access logs
+
+Kafka traffic bypasses Istio entirely because MSK runs outside the cluster in dedicated AWS-managed infrastructure.
+
+#### Istio Authorization Policies (Least Privilege)
+
+Four policies enforce the communication matrix:
+
+| Policy | What It Does |
+|--------|-------------|
+| `allow-gateway-ingress` | Istio Gateway (istio-ingress namespace) can reach all 5 API services |
+| `allow-saga-orchestrator` | Saga Orchestrator service account can call Consumer, Restaurant, Order, Courier |
+| `restrict-saga-orchestrator` | Saga Orchestrator only reachable from within munchgo namespace + Istio Gateway |
+| `allow-health-checks` | Any source can reach `/actuator/health/*` endpoints (for K8s probes) |
+
+**Default deny**: any traffic not explicitly allowed is blocked. If Consumer Service tried to call Order Service via HTTP, the waypoint would reject it — only Saga Orchestrator has that permission.
 
 ### Private Connectivity
 
@@ -152,31 +338,21 @@ graph TB
         subgraph VPC ["VPC (10.0.0.0/16)"]
             subgraph PrivSubnets [Private Subnets]
                 subgraph EKSNodes [EKS Nodes]
-                    subgraph ns_istio_system ["istio-system namespace"]
-                        istiod_n[istiod — Control Plane]
-                        cni_n[istio-cni — DaemonSet]
-                        ztunnel_n[ztunnel — L4 mTLS DaemonSet]
-                    end
-                    subgraph ns_istio_ingress ["istio-ingress namespace"]
+                    subgraph ns_istio_ingress ["istio-ingress"]
                         gw_pod[Istio Gateway Pod]
                     end
-                    subgraph ns_gw_health2 ["gateway-health namespace"]
-                        health_n[health-responder — ClusterIP]
-                    end
-                    subgraph ns_sample_apps ["sample-apps namespace"]
-                        app1_n[sample-app-1 — ClusterIP]
-                        app2_n[sample-app-2 — ClusterIP]
-                    end
-                    subgraph ns_api2 ["api-services namespace"]
-                        api_n[users-api — ClusterIP]
+                    subgraph ns_munchgo2 ["munchgo"]
+                        services_n[6 MunchGo Services<br/>All ClusterIP :8080]
                     end
                 end
                 INLB[Internal NLB<br/>Created by Istio Gateway<br/>+ AWS LB Controller]
             end
-            TGW_Y[Transit Gateway<br/>Created by you<br/>Shared to Kong via AWS RAM]
+            TGW_Y[Transit Gateway<br/>Created by Terraform<br/>Shared to Kong via AWS RAM]
             RT_Y[Route: 192.168.0.0/16 → TGW]
             SG_Y[SG: Allow inbound<br/>from 192.168.0.0/16]
         end
+        MSK2[Amazon MSK<br/>Private Subnets]
+        RDS2[Amazon RDS<br/>Private Subnets]
     end
 
     subgraph kong_acct2 ["Kong's AWS Account"]
@@ -198,18 +374,15 @@ graph TB
     style KNLB fill:#003459,color:#fff
     style KDP fill:#003459,color:#fff
     style gw_pod fill:#466BB0,color:#fff
-    style istiod_n fill:#466BB0,color:#fff
+    style services_n fill:#2E8B57,color:#fff
+    style MSK2 fill:#FF9900,color:#fff
+    style RDS2 fill:#3B48CC,color:#fff
     style your_acct2 fill:#E8E8E8,stroke:#999,color:#333
     style kong_acct2 fill:#E8E8E8,stroke:#999,color:#333
     style VPC fill:#F0F0F0,stroke:#BBB,color:#333
     style KVPC fill:#F0F0F0,stroke:#BBB,color:#333
     style PrivSubnets fill:#F5F5F5,stroke:#CCC,color:#333
     style EKSNodes fill:#FAFAFA,stroke:#DDD,color:#333
-    style ns_istio_system fill:#FAFAFA,stroke:#DDD,color:#333
-    style ns_istio_ingress fill:#FAFAFA,stroke:#DDD,color:#333
-    style ns_gw_health2 fill:#FAFAFA,stroke:#DDD,color:#333
-    style ns_sample_apps fill:#FAFAFA,stroke:#DDD,color:#333
-    style ns_api2 fill:#FAFAFA,stroke:#DDD,color:#333
 ```
 
 How it works (all automated):
@@ -226,29 +399,549 @@ How it works (all automated):
 |-------|-----------|------------|
 | 1 | CloudFront + WAF | DDoS, SQLi/XSS, rate limiting, geo-blocking |
 | 2 | Origin mTLS | CloudFront bypass prevention (via CloudFormation) |
-| 3 | Kong Plugins | JWT auth, rate limiting, CORS, request transform |
+| 3 | Kong Plugins | OpenID Connect (Cognito JWKS), per-route rate limiting, CORS, request transform |
 | 4 | Transit Gateway | Private connectivity — backends never exposed publicly |
-| 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods |
-| 6 | ClusterIP Services | No direct external access to backend services |
+| 5 | Istio Ambient mTLS | Automatic L4 encryption between all mesh pods (ztunnel) |
+| 6 | Waypoint AuthZ | L7 authorization policies for east-west traffic |
+| 7 | PeerAuthentication | Strict mTLS enforcement — no plaintext allowed |
+| 8 | ClusterIP Services | No direct external access to backend services |
+| 9 | External Secrets | AWS Secrets Manager → K8s Secrets via IRSA (no hardcoded credentials) |
+
+---
+
+## MunchGo Microservices
+
+A food delivery platform built with Java 21 + Spring Boot, following event-driven, CQRS, and saga orchestration patterns.
+
+### Service Architecture
+
+The platform uses two distinct communication patterns: **north-south** traffic enters via Kong Cloud Gateway through the Istio Gateway, while **east-west** traffic between services uses a mix of synchronous HTTP (via Istio mTLS) and asynchronous Kafka events (via external MSK).
+
+```mermaid
+graph TB
+    subgraph external ["North-South Traffic (Kong → Istio Gateway)"]
+        KONG[Kong Cloud Gateway<br/>OIDC (Cognito) Auth]
+    end
+
+    subgraph munchgo_ns ["munchgo namespace (Istio Ambient mTLS)"]
+        AUTH3[auth-service<br/>:8080<br/>Cognito Facade]
+        CONSUMER3[consumer-service<br/>:8080<br/>Customer Profiles]
+        RESTAURANT3[restaurant-service<br/>:8080<br/>Menus & Items]
+        ORDER3[order-service<br/>:8080<br/>CQRS + Event Sourcing]
+        COURIER3[courier-service<br/>:8080<br/>Delivery Assignments]
+        SAGA3[saga-orchestrator<br/>:8080<br/>Saga Coordination]
+    end
+
+    subgraph messaging ["Async Messaging (external to mesh)"]
+        KAFKA[Amazon MSK<br/>Kafka 3.6.0]
+    end
+
+    subgraph storage ["Persistent Storage"]
+        DB[(Amazon RDS PostgreSQL 16<br/>Shared Instance · 6 Databases)]
+    end
+
+    KONG -->|/api/auth — Public| AUTH3
+    KONG -->|/api/consumers — OIDC| CONSUMER3
+    KONG -->|/api/restaurants — OIDC| RESTAURANT3
+    KONG -->|/api/orders — OIDC| ORDER3
+    KONG -->|/api/couriers — OIDC| COURIER3
+
+    SAGA3 -->|"HTTP GET (Istio mTLS)"| CONSUMER3
+    SAGA3 -->|"HTTP GET (Istio mTLS)"| RESTAURANT3
+    SAGA3 -->|"HTTP POST/PUT (Istio mTLS)"| ORDER3
+
+    AUTH3 -.->|"Kafka: user-events"| KAFKA
+    SAGA3 -.->|"Kafka: saga-commands"| KAFKA
+    KAFKA -.->|"Kafka: user-events"| CONSUMER3
+    KAFKA -.->|"Kafka: user-events"| COURIER3
+    KAFKA -.->|"Kafka: saga-replies"| SAGA3
+
+    AUTH3 -->|munchgo_auth| DB
+    CONSUMER3 -->|munchgo_consumers| DB
+    RESTAURANT3 -->|munchgo_restaurants| DB
+    ORDER3 -->|munchgo_orders| DB
+    COURIER3 -->|munchgo_couriers| DB
+    SAGA3 -->|munchgo_sagas| DB
+
+    style KONG fill:#003459,color:#fff
+    style AUTH3 fill:#2E8B57,color:#fff
+    style CONSUMER3 fill:#2E8B57,color:#fff
+    style RESTAURANT3 fill:#2E8B57,color:#fff
+    style ORDER3 fill:#2E8B57,color:#fff
+    style COURIER3 fill:#2E8B57,color:#fff
+    style SAGA3 fill:#8B0000,color:#fff
+    style KAFKA fill:#FF9900,color:#fff
+    style DB fill:#3B48CC,color:#fff
+    style external fill:#E8E8E8,stroke:#999,color:#333
+    style munchgo_ns fill:#F0F0F0,stroke:#BBB,color:#333
+    style messaging fill:#F5F5F5,stroke:#CCC,color:#333
+    style storage fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+> **Solid arrows** between services = synchronous HTTP calls, encrypted by Istio ztunnel mTLS and authorized by waypoint L7 policy.
+> **Dashed arrows** to/from Kafka = asynchronous events, external to the mesh (Amazon MSK).
+
+### Service Details
+
+| Service | Port | Database | Kong Route | Auth | Pattern |
+|---------|------|----------|------------|------|---------|
+| **auth-service** | 8080 | munchgo_auth | `/api/auth` | Public | Cognito facade |
+| **consumer-service** | 8080 | munchgo_consumers | `/api/consumers` | OIDC | CRUD |
+| **restaurant-service** | 8080 | munchgo_restaurants | `/api/restaurants` | OIDC | CRUD |
+| **order-service** | 8080 | munchgo_orders | `/api/orders` | OIDC | CQRS + Event Sourcing |
+| **courier-service** | 8080 | munchgo_couriers | `/api/couriers` | OIDC | CRUD |
+| **saga-orchestrator** | 8080 | munchgo_sagas | *Internal only* | Mesh mTLS | Saga Orchestration |
+
+### Authentication — Amazon Cognito + OIDC
+
+**Amazon Cognito** is the identity provider. **Only the auth-service talks to Cognito** — all other services rely on Kong's upstream headers for user identity. Kong validates tokens at the edge using the **OpenID Connect** plugin with automatic JWKS discovery.
+
+#### Cognito Interaction Model
+
+| Component | Auth Responsibility |
+|-----------|-------------------|
+| **Amazon Cognito** | Identity store, password hashing, token issuance, JWKS endpoint, group membership |
+| **auth-service** | Cognito facade — proxies register/login/refresh/logout, maintains local user ref, publishes Kafka events |
+| **Kong OIDC plugin** | Token validation at the edge via JWKS, claims extraction → upstream headers |
+| **Pre Token Lambda** | Injects `custom:roles` claim into access + ID tokens based on User Pool groups |
+| **Other services** | Read `X-User-*` headers — zero auth logic, fully trust Kong's verification |
+| **Istio mTLS** | Encrypts and authenticates all pod-to-pod traffic (east-west) — separate from Cognito |
+
+```mermaid
+graph LR
+    subgraph direct ["Direct Cognito Access"]
+        AUTH_C[auth-service] -->|"AWS SDK v2<br/>(IRSA)"| COG[Amazon Cognito]
+    end
+
+    subgraph trust ["Trust Kong Headers (no Cognito access)"]
+        CS[consumer-service]
+        RS[restaurant-service]
+        OS[order-service]
+        CRS[courier-service]
+        SAGA_C[saga-orchestrator]
+    end
+
+    KONG_C[Kong OIDC Plugin] -->|"X-User-Sub<br/>X-User-Email<br/>X-User-Roles"| CS
+    KONG_C -->|upstream headers| RS
+    KONG_C -->|upstream headers| OS
+    KONG_C -->|upstream headers| CRS
+
+    style AUTH_C fill:#2E8B57,color:#fff
+    style COG fill:#DD344C,color:#fff
+    style KONG_C fill:#003459,color:#fff
+    style CS fill:#2E8B57,color:#fff
+    style RS fill:#2E8B57,color:#fff
+    style OS fill:#2E8B57,color:#fff
+    style CRS fill:#2E8B57,color:#fff
+    style SAGA_C fill:#8B0000,color:#fff
+    style direct fill:#F0F0F0,stroke:#BBB,color:#333
+    style trust fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+#### Registration Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Auth as auth-service
+    participant Cognito as Amazon Cognito
+    participant Kafka as Kafka (MSK)
+    participant CS as consumer-service
+    participant CR as courier-service
+
+    C->>CF: POST /api/auth/register<br/>{ email, password, firstName, lastName, role }
+    CF->>Kong: Forward (WAF inspected)
+    Kong->>Auth: Forward (public route — no OIDC)
+
+    rect rgb(255, 248, 240)
+        Note over Auth,Cognito: Cognito Admin API calls (AWS SDK v2 via IRSA)
+        Auth->>Cognito: 1. AdminCreateUser (email as username)
+        Auth->>Cognito: 2. AdminSetUserPassword (permanent)
+        Auth->>Cognito: 3. AdminAddUserToGroup (e.g. ROLE_CUSTOMER)
+        Auth->>Cognito: 4. AdminInitiateAuth (get tokens)
+        Cognito->>Cognito: Pre Token Lambda V2<br/>adds custom:roles claim
+        Cognito-->>Auth: { accessToken, idToken, refreshToken }
+    end
+
+    rect rgb(240, 248, 255)
+        Note over Auth,CR: Local state + Kafka event cascade
+        Auth->>Auth: getCognitoSub(email)<br/>Create thin local User { id, email, cognitoSub, role }
+        Auth->>Kafka: UserRegisteredEvent (transactional outbox)
+        Kafka->>CS: ROLE_CUSTOMER → auto-create Consumer entity
+        Kafka->>CR: ROLE_COURIER → auto-create Courier entity
+    end
+
+    Auth-->>Kong: { userId, accessToken, idToken, refreshToken }
+    Kong-->>CF: Response
+    CF-->>C: Tokens returned
+```
+
+#### Login Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Auth as auth-service
+    participant Cognito as Amazon Cognito
+
+    C->>CF: POST /api/auth/login { email, password }
+    CF->>Kong: Forward (WAF inspected)
+    Kong->>Auth: Forward (public route — no OIDC)
+    Auth->>Auth: Find local user by email
+    Auth->>Cognito: AdminInitiateAuth<br/>(ADMIN_USER_PASSWORD_AUTH)
+    Cognito->>Cognito: Validate credentials<br/>Pre Token Lambda → custom:roles
+    Cognito-->>Auth: { accessToken, idToken, refreshToken }
+    Auth-->>Kong: { userId, accessToken, idToken, refreshToken }
+    Kong-->>CF: Response
+    CF-->>C: Tokens returned
+```
+
+#### Authorization Flow (Protected API Call)
+
+This is where Kong's OIDC plugin does the heavy lifting — **no microservice auth code involved**:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CF as CloudFront + WAF
+    participant Kong as Kong Gateway
+    participant Svc as order-service
+
+    C->>CF: GET /api/orders<br/>Authorization: Bearer <access_token>
+    CF->>Kong: Forward (WAF inspected)
+
+    rect rgb(255, 248, 240)
+        Note over Kong: OIDC Plugin — automatic token validation
+        Kong->>Kong: 1. Fetch Cognito JWKS (cached 300s)
+        Kong->>Kong: 2. Verify signature + expiry + issuer
+        Kong->>Kong: 3. Extract claims → upstream headers
+    end
+
+    alt Token valid
+        Kong->>Svc: Forward request +<br/>X-User-Sub · X-User-Email · X-User-Roles
+        Svc->>Svc: Read X-User-* headers<br/>(trusts Kong, zero token logic)
+        Svc-->>Kong: Response
+        Kong-->>CF: Response
+        CF-->>C: Data returned
+    else Token invalid / expired
+        Kong-->>CF: 401 Unauthorized
+        CF-->>C: 401 (request never reaches backend)
+    end
+```
+
+#### Token Refresh & Logout
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Auth as auth-service
+    participant Cognito as Amazon Cognito
+
+    Note over C,Cognito: Token Refresh (public route)
+    C->>Auth: POST /api/auth/refresh { refreshToken }
+    Auth->>Cognito: InitiateAuth (REFRESH_TOKEN_AUTH)
+    Cognito-->>Auth: New accessToken + idToken
+    Auth-->>C: { accessToken, idToken }
+
+    Note over C,Cognito: Logout — Global Sign Out
+    C->>Auth: POST /api/auth/logout/{userId}
+    Auth->>Auth: Lookup user email
+    Auth->>Cognito: AdminUserGlobalSignOut(email)
+    Cognito->>Cognito: Invalidate ALL tokens for user
+    Auth-->>C: 200 OK
+    Note over C: Subsequent API calls with old tokens<br/>fail at Kong OIDC validation → 401
+```
+
+#### Cognito Configuration
+
+**User Pool:**
+- Password policy: min 8 chars, uppercase/lowercase/numbers/symbols
+- User Pool Groups: `ROLE_CUSTOMER`, `ROLE_RESTAURANT_OWNER`, `ROLE_COURIER`, `ROLE_ADMIN`
+- Pre Token Generation Lambda (V2): adds `custom:roles` claim to access + ID tokens
+- Token validity: Access=1hr, ID=1hr, Refresh=7 days
+- Provisioned by Terraform (`terraform/modules/cognito/`)
+- Secrets stored in AWS Secrets Manager, synced to K8s via External Secrets Operator
+
+**Kong OIDC plugin (per protected route):**
+- Auto-discovers Cognito JWKS via `.well-known/openid-configuration`
+- Validates token signature, expiry, and issuer
+- Forwards claims as upstream headers: `X-User-Sub`, `X-User-Email`, `X-User-Roles`
+- Protected routes: `/api/consumers`, `/api/orders`, `/api/couriers`, `/api/restaurants`
+- Public routes: `/api/auth/*` (register, login, refresh, logout), `/healthz`
+- JWKS cache TTL: 300s — automatic key rotation with zero downtime
+
+**auth-service IRSA:**
+- Runs with a K8s ServiceAccount annotated with an IAM role (`eks.amazonaws.com/role-arn`)
+- IAM policy grants Cognito Admin API access: `AdminCreateUser`, `AdminInitiateAuth`, `AdminSetUserPassword`, `AdminAddUserToGroup`, `AdminGetUser`, `AdminUserGlobalSignOut`, etc.
+- AWS SDK `DefaultCredentialsProvider` picks up IRSA tokens automatically — no hardcoded credentials
+
+### Order Saga Flow
+
+The saga orchestrator uses a **hybrid approach**: synchronous HTTP calls (via Istio mTLS) for validation and order management, and asynchronous Kafka commands for courier assignment. Circuit breakers (Resilience4j) protect all HTTP calls.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant Kong as Kong Gateway
+    participant IG as Istio Gateway
+    participant S as saga-orchestrator
+    participant CS as consumer-service
+    participant RS as restaurant-service
+    participant O as order-service
+    participant K as Kafka (MSK)
+    participant CR as courier-service
+
+    Note over C,Kong: North-South (JWT verified by Kong)
+    C->>Kong: POST /api/orders
+    Kong->>IG: Forward (JWT valid)
+    IG->>S: HTTPRoute → saga-orchestrator
+
+    Note over S,CS: East-West HTTP (Istio mTLS + Waypoint AuthZ)
+    rect rgb(240, 248, 255)
+        S->>CS: Step 1: GET /api/v1/consumers/{id}
+        CS-->>S: 200 OK (consumer valid)
+    end
+
+    rect rgb(240, 248, 255)
+        S->>RS: Step 2: GET /api/v1/restaurants/{id}
+        RS-->>S: 200 OK (restaurant valid)
+    end
+
+    rect rgb(240, 248, 255)
+        S->>O: Step 3: POST /api/v1/orders
+        O-->>S: 201 Created (orderId)
+    end
+
+    Note over S,CR: Async via Kafka (external MSK)
+    rect rgb(255, 248, 240)
+        S->>K: Step 4: saga-commands (ASSIGN_COURIER)
+        K->>CR: Assign available courier
+        CR->>K: saga-replies (CourierAssigned)
+        K->>S: CourierAssigned (courierId)
+    end
+
+    Note over S,O: East-West HTTP (Istio mTLS)
+    rect rgb(240, 248, 255)
+        S->>O: Step 5: POST /api/v1/orders/{id}/approve
+        O-->>S: 200 OK (order approved)
+    end
+
+    Note over S,S: If any step fails → compensation
+```
+
+**Why hybrid?** Steps 1-3 and 5 need immediate responses (is the consumer valid? does the restaurant exist?) — synchronous HTTP is appropriate. Step 4 uses Kafka because courier assignment may take time (finding an available courier), making async messaging the better fit.
+
+#### Kafka Topics
+
+| Topic | Publisher | Consumer | Purpose |
+|-------|-----------|----------|---------|
+| `user-events` | Auth Service | Consumer Service, Courier Service | Auto-create profile on user registration |
+| `saga-commands` | Saga Orchestrator | Courier Service | Assign courier to order |
+| `saga-replies` | Courier Service | Saga Orchestrator | Courier assignment result |
+
+---
+
+## Repository Structure
+
+### Three-Repo GitOps Model
+
+```mermaid
+graph LR
+    subgraph infra ["Kong-Konnect-Cloud-Gateway-on-EKS<br/>(This Repo)"]
+        TF[Terraform Modules]
+        K8S[K8s Manifests]
+        ARGO[ArgoCD Apps]
+        DECK[Kong deck Config]
+        SCRIPTS[Setup Scripts]
+    end
+
+    subgraph gitops ["munchgo-k8s-config<br/>(GitOps Repo)"]
+        BASE[Kustomize Base<br/>6 Services]
+        OVL[Kustomize Overlays<br/>dev / staging / prod]
+        APPS[ArgoCD Applications<br/>Per-Service]
+    end
+
+    subgraph micro ["munchgo-microservices<br/>(Source Code)"]
+        SRC[Java 21 Spring Boot<br/>6 Microservices]
+        CI[GitHub Actions CI<br/>Build → Jib → ECR]
+    end
+
+    CI -->|"kustomize edit set image"| OVL
+    ARGO -->|"Points to"| gitops
+    ARGO -->|"Deploys"| K8S
+
+    style infra fill:#E8E8E8,stroke:#999,color:#333
+    style gitops fill:#F0F0F0,stroke:#BBB,color:#333
+    style micro fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+| Repository | Purpose | Branch |
+|------------|---------|--------|
+| [`Kong-Konnect-Cloud-Gateway-on-EKS`](https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS) | Infrastructure, K8s manifests, ArgoCD, Kong config | `feature/istio-servicemesh` |
+| [`munchgo-k8s-config`](https://github.com/shanaka-versent/munchgo-k8s-config) | GitOps — Kustomize manifests for MunchGo deployments | `main` |
+| [`munchgo-microservices`](https://github.com/shanaka-versent/munchgo-microservices) | Source code — Java 21 Spring Boot microservices + CI | `main` |
+
+### This Repo — Directory Layout
+
+```
+.
+├── argocd/apps/                    # ArgoCD App of Apps (sync wave ordered)
+│   ├── root-app.yaml               #   Root application (bootstrapped by Terraform)
+│   ├── 00-gateway-api-crds.yaml    #   Wave -2: Gateway API CRDs
+│   ├── 01-namespaces.yaml          #   Wave  1: Namespaces (ambient labeled)
+│   ├── 02-istio-base.yaml          #   Wave -1: Istio CRDs
+│   ├── 03-istiod.yaml              #   Wave  0: Istio control plane
+│   ├── 04-istio-cni.yaml           #   Wave  0: Istio CNI plugin
+│   ├── 05-ztunnel.yaml             #   Wave  0: ztunnel L4 mTLS
+│   ├── 06-gateway.yaml             #   Wave  5: Istio Gateway (internal NLB)
+│   ├── 07-httproutes.yaml          #   Wave  6: HTTPRoutes for MunchGo APIs
+│   ├── 08-apps.yaml                #   Wave  7: Platform apps (health-responder)
+│   ├── 09-external-secrets.yaml    #   Wave  8: External Secrets Operator (Helm)
+│   ├── 09-munchgo-apps.yaml        #   Wave  8: Layer 3→4 bridge (munchgo-k8s-config repo)
+│   ├── 09-external-secrets-config.yaml # Wave 9: ClusterSecretStore + ExternalSecrets
+│   ├── 10-istio-mesh-policies.yaml #   Wave 10: Waypoint, AuthZ, PeerAuth, Telemetry
+│   ├── 11-prometheus.yaml          #   Wave 11: Prometheus + Grafana
+│   ├── 12-jaeger.yaml              #   Wave 12: Jaeger distributed tracing
+│   └── 12-kiali.yaml               #   Wave 12: Kiali service mesh dashboard
+├── deck/
+│   └── kong.yaml                   # Kong Gateway configuration (decK format)
+├── k8s/
+│   ├── namespace.yaml              # Namespace definitions (ambient mesh labeled)
+│   ├── apps/
+│   │   └── health-responder.yaml   # Gateway health check endpoint
+│   ├── external-secrets/
+│   │   ├── cluster-secret-store.yaml   # AWS Secrets Manager ClusterSecretStore
+│   │   ├── munchgo-db-secret.yaml      # ExternalSecrets for 6 service databases
+│   │   └── munchgo-cognito-secret.yaml # ExternalSecret for Cognito config (User Pool ID, Client ID)
+│   └── istio/
+│       ├── gateway.yaml            # Istio Gateway (internal NLB + TLS)
+│       ├── httproutes.yaml         # MunchGo API routes + ReferenceGrants
+│       ├── waypoint.yaml           # Waypoint proxy (L7 in ambient mesh)
+│       ├── authorization-policies.yaml # East-west access control
+│       ├── peer-authentication.yaml    # Strict mTLS enforcement
+│       ├── telemetry.yaml          # Jaeger tracing + Prometheus metrics
+│       └── tls-secret.yaml         # TLS secret reference
+├── scripts/
+│   ├── 01-generate-certs.sh        # Generate TLS certs + K8s secret
+│   ├── 02-setup-cloud-gateway.sh   # Fully automated Kong Konnect setup
+│   ├── 02-generate-jwt.sh          # Generate JWT tokens for testing
+│   ├── 03-post-terraform-setup.sh  # Post-apply NLB endpoint discovery
+│   └── destroy.sh                  # Full stack teardown (correct order)
+└── terraform/
+    ├── main.tf                     # Root module — orchestrates all modules
+    ├── variables.tf                # All configurable parameters
+    ├── outputs.tf                  # Stack outputs (endpoints, ARNs, etc.)
+    ├── providers.tf                # AWS provider configuration
+    └── modules/
+        ├── vpc/                    # VPC, subnets, NAT, IGW
+        ├── eks/                    # EKS cluster + system/user node pools
+        ├── iam/                    # LB Controller IRSA + External Secrets IRSA + Cognito Auth IRSA
+        ├── lb-controller/          # AWS Load Balancer Controller (Helm)
+        ├── argocd/                 # ArgoCD + root app bootstrap
+        ├── cloudfront/             # CloudFront + WAF + Origin mTLS
+        ├── ecr/                    # 6 ECR repositories (MunchGo services)
+        ├── msk/                    # Amazon MSK Kafka cluster
+        ├── rds/                    # RDS PostgreSQL + Secrets Manager
+        ├── cognito/                # Amazon Cognito User Pool, App Client, Groups, Lambda
+        └── spa/                    # S3 bucket for React SPA
+```
+
+---
+
+## GitOps Pipeline
+
+### CI/CD Flow
+
+```mermaid
+graph LR
+    DEV[Developer] -->|git push| MICRO[munchgo-microservices<br/>GitHub]
+    MICRO -->|GitHub Actions| BUILD[Build<br/>Java 21 + Jib]
+    BUILD -->|Push Image| ECR[Amazon ECR<br/>:git-sha]
+    BUILD -->|kustomize edit<br/>set image| GITOPS[munchgo-k8s-config<br/>GitHub]
+    GITOPS -->|ArgoCD watches| ARGO[ArgoCD<br/>Auto-Sync]
+    ARGO -->|kubectl apply| EKS[EKS Cluster<br/>munchgo namespace]
+
+    style DEV fill:#fff,stroke:#333,color:#333
+    style MICRO fill:#24292E,color:#fff
+    style BUILD fill:#F68D2E,color:#fff
+    style ECR fill:#FF9900,color:#fff
+    style GITOPS fill:#24292E,color:#fff
+    style ARGO fill:#EF7B4D,color:#fff
+    style EKS fill:#232F3E,color:#fff
+```
+
+1. Developer pushes code to `munchgo-microservices`
+2. **GitHub Actions** builds the container image using Jib (no Docker daemon needed)
+3. Image is pushed to **Amazon ECR** with the git SHA as the tag
+4. CI updates the **kustomize overlay** in `munchgo-k8s-config` via `kustomize edit set image`
+5. **ArgoCD** detects the change and auto-syncs the new deployment to EKS
+
+### ArgoCD Sync Wave Ordering
+
+```mermaid
+gantt
+    title ArgoCD Sync Wave Deployment Order
+    dateFormat X
+    axisFormat %s
+
+    section Infrastructure
+    Gateway API CRDs (wave -2)          :a1, 0, 1
+    Istio Base CRDs (wave -1)           :a2, 1, 2
+    istiod + CNI + ztunnel (wave 0)     :a3, 2, 3
+    Namespaces (wave 1)                 :a4, 3, 4
+
+    section Service Mesh
+    Istio Gateway + NLB (wave 5)        :b1, 4, 5
+    HTTPRoutes (wave 6)                 :b2, 5, 6
+
+    section Applications
+    Platform Apps (wave 7)              :c1, 6, 7
+    External Secrets + MunchGo (wave 8) :c2, 7, 8
+    SecretStore Config (wave 9)         :c3, 8, 9
+
+    section Mesh Policies
+    Waypoint + AuthZ + mTLS (wave 10)   :d1, 9, 10
+
+    section Observability
+    Prometheus + Grafana (wave 11)      :e1, 10, 11
+    Kiali + Jaeger (wave 12)            :e2, 11, 12
+```
+
+| Wave | Application | What Gets Deployed |
+|------|-------------|-------------------|
+| -2 | gateway-api-crds | `Gateway`, `HTTPRoute`, `ReferenceGrant` CRDs |
+| -1 | istio-base | Istio CRDs and cluster-wide resources |
+| 0 | istiod, istio-cni, ztunnel | Ambient mesh control + data plane |
+| 1 | namespaces | `munchgo`, `external-secrets`, `observability` (ambient labeled) |
+| 5 | gateway | Istio Gateway → creates single internal NLB |
+| 6 | httproutes | `/api/auth`, `/api/consumers`, `/api/restaurants`, `/api/orders`, `/api/couriers` |
+| 7 | platform-apps | health-responder |
+| 8 | external-secrets, munchgo-apps | ESO Helm chart + MunchGo services (from GitOps repo) |
+| 9 | external-secrets-config | ClusterSecretStore + ExternalSecrets (DB credentials) |
+| 10 | istio-mesh-policies | Waypoint proxy, AuthorizationPolicy, PeerAuthentication, Telemetry |
+| 11 | prometheus-stack | kube-prometheus-stack + Grafana dashboards |
+| 12 | kiali, jaeger | Service mesh dashboard + distributed tracing |
 
 ### Architecture Layers
 
 System nodes handle critical add-ons (tainted with `CriticalAddonsOnly`), while User nodes run application workloads. DaemonSets (istio-cni, ztunnel) run on **all** nodes via tolerations.
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '16px'}, 'flowchart': {'nodeSpacing': 50, 'rankSpacing': 80, 'padding': 30}}}%%
 flowchart TB
     subgraph EKS["EKS Cluster"]
         subgraph SystemPool["System Node Pool<br/>(Taint: CriticalAddonsOnly)"]
             subgraph KS["kube-system"]
                 LBC2[aws-lb-controller]
                 CoreDNS[coredns]
-                KubeProxy[kube-proxy]
             end
             subgraph IS["istio-system"]
                 Istiod2[istiod]
-                CNI2[istio-cni<br/>DaemonSet]
-                ZT2[ztunnel<br/>DaemonSet]
+                CNI2[istio-cni DaemonSet]
+                ZT2[ztunnel DaemonSet]
             end
             subgraph II["istio-ingress"]
                 GW2[Istio Gateway]
@@ -258,21 +951,25 @@ flowchart TB
             end
         end
 
-        subgraph UserPool["User Node Pool<br/>(No Taint)"]
+        subgraph UserPool["User Node Pool"]
+            subgraph MG["munchgo"]
+                Auth[auth-service]
+                Consumer[consumer-service]
+                Restaurant[restaurant-service]
+                Order[order-service]
+                Courier[courier-service]
+                Saga[saga-orchestrator]
+            end
             subgraph GH["gateway-health"]
                 HealthResp[health-responder]
             end
-            subgraph SA["sample-apps"]
-                App1B[sample-app-1]
-                App2B[sample-app-2]
-            end
-            subgraph AS["api-services"]
-                ApiB[users-api]
+            subgraph OBS["observability"]
+                Prom[Prometheus + Grafana]
+                Kiali2[Kiali]
+                Jaeger2[Jaeger]
             end
         end
     end
-
-    Note["Note: DaemonSets (istio-cni, ztunnel)<br/>run on ALL nodes with tolerations"]
 
     style EKS fill:#E8E8E8,stroke:#999,color:#333
     style SystemPool fill:#F0F0F0,stroke:#BBB,color:#333
@@ -281,18 +978,10 @@ flowchart TB
     style IS fill:#F5F5F5,stroke:#CCC,color:#333
     style II fill:#F5F5F5,stroke:#CCC,color:#333
     style AC fill:#F5F5F5,stroke:#CCC,color:#333
+    style MG fill:#F5F5F5,stroke:#CCC,color:#333
     style GH fill:#F5F5F5,stroke:#CCC,color:#333
-    style SA fill:#F5F5F5,stroke:#CCC,color:#333
-    style AS fill:#F5F5F5,stroke:#CCC,color:#333
-    style Note fill:#FFFBE6,stroke:#E6D800,color:#333
+    style OBS fill:#F5F5F5,stroke:#CCC,color:#333
 ```
-
-| Node Pool | Taint | Components | Purpose |
-|-----------|-------|------------|---------|
-| **System** | `CriticalAddonsOnly=true:NoSchedule` | istiod, istio-cni, ztunnel, aws-lb-controller, ArgoCD, coredns | Infrastructure and mesh control plane |
-| **User** | None | health-responder, sample-app-1/2, users-api | Application workloads |
-
-> istiod uses `nodeSelector: node-role: system` to pin to system nodes. istio-cni and ztunnel are DaemonSets with `CriticalAddonsOnly` tolerations so they run on all nodes.
 
 ---
 
@@ -308,7 +997,7 @@ flowchart TB
 
 ## Deployment
 
-Seven steps, zero manual console clicks. Terraform handles infrastructure in two phases (CloudFront depends on the Kong proxy URL from Step 5), ArgoCD syncs K8s resources, and scripts automate Konnect setup.
+Eight steps, zero manual console clicks. Terraform handles infrastructure in two phases (CloudFront depends on the Kong proxy URL from Step 5), ArgoCD syncs K8s resources, and scripts automate Konnect + Cognito setup.
 
 ### Deployment Layers
 
@@ -319,39 +1008,48 @@ graph TB
     end
 
     subgraph L2 ["Layer 2: EKS Platform — Terraform"]
-        EKS[EKS Cluster + Nodes]
-        LBC[AWS LB Controller]
-        TGW2[Transit Gateway + RAM]
-        ArgoCD2[ArgoCD]
+        EKS2[EKS Cluster + Nodes]
+        LBC3[AWS LB Controller]
+        TGW3[Transit Gateway + RAM]
+        ArgoCD3[ArgoCD]
+        ECR2[ECR Repos]
+        MSK3[MSK Kafka]
+        RDS3[RDS PostgreSQL]
+        SPA[S3 SPA Bucket]
     end
 
-    subgraph L3 ["Layer 3: Service Mesh — ArgoCD"]
-        CRDs[Gateway API CRDs]
-        Istio[Istio Ambient<br/>base · istiod · cni · ztunnel]
-        GW[Istio Gateway<br/>Single Internal NLB]
-        Routes[HTTPRoutes<br/>+ ReferenceGrants]
+    subgraph L3 ["Layer 3: EKS Customizations — ArgoCD (this repo)"]
+        CRDs2[Gateway API CRDs]
+        Istio2[Istio Ambient<br/>base · istiod · cni · ztunnel]
+        GW3[Istio Gateway<br/>Single Internal NLB]
+        Routes2[HTTPRoutes + ReferenceGrants]
+        ESO[External Secrets Operator]
+        MeshPol[Mesh Policies<br/>Waypoint · AuthZ · mTLS]
+        HealthApp[health-responder]
+        BRIDGE[09-munchgo-apps<br/>Layer 3→4 Bridge]
     end
 
-    subgraph L4 ["Layer 4: Applications — ArgoCD"]
-        Apps[Backend Services<br/>All ClusterIP]
+    subgraph L4 ["Layer 4: Applications — ArgoCD (munchgo-k8s-config repo)"]
+        MunchGoApps[MunchGo Services<br/>6 ArgoCD Apps · Kustomize overlays<br/>CI auto-updates image tags]
     end
 
     subgraph L5 ["Layer 5: API Config — Kong Konnect"]
-        KongGW[Kong Cloud Gateway<br/>Routes · Plugins · Consumers<br/>Connects via Transit Gateway]
+        KongGW2[Kong Cloud Gateway<br/>OIDC (Cognito) · Rate Limit · CORS<br/>Connects via Transit Gateway]
     end
 
     subgraph L6 ["Layer 6: Edge Security — Terraform"]
-        CFront[CloudFront + WAF<br/>Origin mTLS]
+        CFront2[CloudFront + WAF<br/>Origin mTLS + S3 SPA Origin]
     end
 
-    VPC --> EKS
-    EKS --> CRDs
-    CRDs --> Istio
-    Istio --> GW
-    GW --> Routes
-    Routes --> Apps
-    Apps -.->|Transit GW| KongGW
-    KongGW -.-> CFront
+    VPC --> EKS2
+    EKS2 --> CRDs2
+    CRDs2 --> Istio2
+    Istio2 --> GW3
+    GW3 --> Routes2
+    Routes2 --> BRIDGE
+    BRIDGE -->|discovers 6 service Apps| MunchGoApps
+    MunchGoApps -.->|Transit GW| KongGW2
+    KongGW2 -.-> CFront2
 
     style L1 fill:#E8E8E8,stroke:#999,color:#333
     style L2 fill:#E8E8E8,stroke:#999,color:#333
@@ -375,7 +1073,7 @@ KONNECT_TOKEN="kpat_your_token_here"
 KONNECT_CONTROL_PLANE_NAME="kong-cloud-gateway-eks"
 ```
 
-> `.env` is **gitignored** — your token never gets committed. All scripts auto-source it. Transit Gateway IDs and NLB DNS are **auto-read from Terraform** — no manual entry needed.
+> `.env` is **gitignored** — your token never gets committed. All scripts auto-source it.
 
 ### Step 2: Deploy Infrastructure + GitOps
 
@@ -384,25 +1082,15 @@ terraform -chdir=terraform init
 terraform -chdir=terraform apply
 ```
 
-This creates Layers 1-4 in one shot:
+This creates Layers 1-3 in one shot:
 - VPC, EKS cluster, node groups (system + user), AWS LB Controller, Transit Gateway + RAM share
-- ArgoCD + **root application** (App of Apps) — bootstrapped automatically via the `argocd-apps` Helm chart
+- **ECR** (6 repositories), **MSK** (Kafka), **RDS** (PostgreSQL + 6 databases), **S3** (SPA bucket)
+- **Amazon Cognito** — User Pool, App Client, User Pool Groups, Pre Token Generation Lambda, Secrets Manager entries
+- ArgoCD + **root application** (App of Apps) — bootstrapped automatically
 
-> CloudFront + WAF (Layer 6) is deployed in Step 7 after the Kong proxy URL is available.
+ArgoCD immediately begins syncing all Layer 3 child apps via **sync waves** in dependency order (see table above). The `09-munchgo-apps.yaml` bridge app (sync wave 8) discovers Layer 4 service Applications from the `munchgo-k8s-config` GitOps repo.
 
-ArgoCD immediately begins syncing all child apps via **sync waves** in dependency order:
-
-| Wave | Component | What it deploys |
-|------|-----------|----------------|
-| -2 | Gateway API CRDs | `Gateway`, `HTTPRoute`, `ReferenceGrant` CRDs |
-| -1 | Istio Base | Istio CRDs and cluster-wide resources |
-| 0 | istiod + cni + ztunnel | Ambient mesh control and data plane |
-| 1 | Namespaces | Namespaces with `istio.io/dataplane-mode: ambient` label |
-| 5 | Istio Gateway | Single internal NLB via AWS LB Controller |
-| 6 | HTTPRoutes | Path-based routing + ReferenceGrants |
-| 7 | Applications | Backend services (all ClusterIP) |
-
-> No manual `kubectl apply` needed — Terraform bootstraps ArgoCD and the root app automatically.
+> CloudFront + WAF (Layer 6) is deployed in Step 8 after the Kong proxy URL is available.
 
 ### Step 3: Configure kubectl
 
@@ -418,7 +1106,7 @@ aws eks update-kubeconfig \
 ./scripts/01-generate-certs.sh
 ```
 
-This generates a self-signed CA + server certificate and **automatically creates** the `istio-gateway-tls` Kubernetes secret in the `istio-ingress` namespace. The Istio Gateway HTTPS listener (port 443) uses this secret for TLS termination, completing the end-to-end encryption chain.
+Generates a self-signed CA + server certificate and **automatically creates** the `istio-gateway-tls` Kubernetes secret.
 
 ### Step 5: Set Up Kong Cloud Gateway
 
@@ -426,37 +1114,32 @@ This generates a self-signed CA + server certificate and **automatically creates
 ./scripts/02-setup-cloud-gateway.sh
 ```
 
-The script fully automates all Konnect and AWS setup:
+Fully automates Konnect and AWS setup:
+1. Creates Konnect control plane (`cloud_gateway: true`)
+2. Provisions Cloud Gateway network (~30 minutes)
+3. Shares Transit Gateway via AWS RAM
+4. Auto-accepts TGW attachment
 
-1. Creates the Konnect control plane (with `cloud_gateway: true`)
-2. Provisions the Cloud Gateway network in Kong's AWS account
-3. Creates the data plane group configuration
-4. Fetches Kong's AWS account ID and adds it as a RAM principal
-5. Waits for the network to reach `ready` state (~30 minutes)
-6. Attaches the Transit Gateway (auto-accepted via `auto_accept_shared_attachments`)
-7. Waits for the TGW attachment to complete
-
-> No AWS Console clicks required — everything is handled by the script and Terraform configuration.
-
-### Step 6: Configure Kong Routes
-
-Get the Istio Gateway NLB endpoint:
+### Step 6: Populate Config Placeholders
 
 ```bash
 ./scripts/03-post-terraform-setup.sh
 ```
 
-Update `deck/kong.yaml` with the NLB hostname from the script output. All services point to the **same** NLB — Istio Gateway uses HTTPRoutes to route to the correct backend:
+This script **automatically reads all Terraform outputs** and populates every placeholder across the deployment:
 
-```yaml
-services:
-  - name: users-api
-    url: http://<istio-gateway-nlb-dns>:80
-  - name: tenant-app1
-    url: http://<istio-gateway-nlb-dns>:80
-```
+| File | Placeholders Replaced |
+|------|----------------------|
+| `deck/kong.yaml` | `PLACEHOLDER_NLB_DNS`, `PLACEHOLDER_COGNITO_ISSUER_URL` |
+| `k8s/external-secrets/munchgo-cognito-secret.yaml` | `PLACEHOLDER-munchgo-cognito` |
+| `k8s/external-secrets/munchgo-db-secret.yaml` | All 7 `PLACEHOLDER-munchgo-*-db` secrets |
+| `munchgo-k8s-config/overlays/dev/auth-service/kustomization.yaml` | `COGNITO_AUTH_SERVICE_ROLE_ARN` |
 
-Sync routes to Konnect:
+> The script waits for the Istio Gateway NLB to be provisioned before replacing `PLACEHOLDER_NLB_DNS`. If the NLB isn't ready, it skips that placeholder and you can re-run the script later.
+
+### Step 7: Sync Kong Configuration
+
+Push the populated config to Kong Konnect:
 
 ```bash
 deck gateway sync deck/kong.yaml \
@@ -465,29 +1148,55 @@ deck gateway sync deck/kong.yaml \
   --konnect-control-plane-name $KONNECT_CONTROL_PLANE_NAME
 ```
 
-### Step 7: Deploy CloudFront + WAF
+Commit the populated files so ArgoCD picks up the ExternalSecret changes:
 
-After the Kong Cloud Gateway is provisioned (Step 5), get the **Public Edge DNS** from [Konnect UI](https://cloud.konghq.com) → **Gateway Manager** → **kong-cloud-gateway-eks** → **Connect**.
-
-Add the Kong proxy domain to `terraform/terraform.tfvars`:
-
-```hcl
-kong_cloud_gateway_domain = "<hash>.aws-ap-southeast-2.edge.gateways.konggateway.com"
+```bash
+git add deck/kong.yaml k8s/external-secrets/
+git commit -m "Populate deployment placeholders from terraform outputs"
+git push
 ```
 
-Re-run Terraform to deploy CloudFront + WAF:
+### Step 8: Deploy CloudFront + WAF
+
+Get the **Public Edge DNS** from Konnect UI → Gateway Manager → Connect.
+
+```hcl
+# terraform/terraform.tfvars
+kong_cloud_gateway_domain = "<hash>.aws-ap-southeast-2.edge.gateways.konggateway.com"
+```
 
 ```bash
 terraform -chdir=terraform apply
 ```
 
-This creates:
-- **CloudFront distribution** with Kong Cloud Gateway as the origin
-- **AWS WAF** Web ACL with DDoS, SQLi/XSS, and rate limiting rules
-- **Origin mTLS** to prevent direct access to Kong Cloud Gateway (bypassing WAF)
-- **Security headers** (HSTS, X-Frame-Options, Content-Security-Policy, etc.)
+> **CloudFront is mandatory** — WAF rules protect against OWASP Top 10, bot traffic, and DDoS. The CloudFront→Kong origin uses mTLS to prevent bypassing edge security.
 
-> After deployment, all client traffic must go through the CloudFront URL. Direct access to Kong Cloud Gateway is blocked by origin mTLS.
+### Access URL
+
+After Step 8 completes, your application URL is the CloudFront distribution domain:
+
+```bash
+export APP_URL=$(terraform -chdir=terraform output -raw application_url)
+echo "Application URL: $APP_URL"
+```
+
+All API traffic must flow through CloudFront → WAF → Kong Cloud Gateway → Istio mesh:
+
+```
+Client → CloudFront (WAF) → Kong Cloud Gateway (OIDC) → Transit GW → NLB → Istio Gateway → Services
+```
+
+### Generate a Test Token (Optional)
+
+```bash
+./scripts/02-generate-jwt.sh
+```
+
+Registers a test user in Cognito and returns access/ID/refresh tokens. Use the access token to test protected APIs:
+
+```bash
+curl -H "Authorization: Bearer $ACCESS_TOKEN" $APP_URL/api/orders
+```
 
 ---
 
@@ -497,7 +1206,7 @@ This creates:
 # Istio Ambient components
 kubectl get pods -n istio-system
 
-# Gateway status and NLB address
+# Gateway + NLB
 kubectl get gateway -n istio-ingress
 kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
   -o jsonpath='{.status.addresses[0].value}'
@@ -505,23 +1214,78 @@ kubectl get gateway -n istio-ingress kong-cloud-gw-gateway \
 # HTTPRoutes
 kubectl get httproute -A
 
-# Backend pods
-kubectl get pods -n gateway-health
-kubectl get pods -n sample-apps
-kubectl get pods -n api-services
+# MunchGo services (all pods running)
+kubectl get pods -n munchgo
+kubectl get svc -n munchgo
 
-# TLS secret
-kubectl get secret istio-gateway-tls -n istio-ingress
+# Waypoint proxy
+kubectl get gateway -n munchgo munchgo-waypoint
 
-# End-to-end test via CloudFront (all traffic goes through WAF)
+# Mesh policies
+kubectl get peerauthentication -n munchgo
+kubectl get authorizationpolicy -n munchgo
+
+# External Secrets (all synced, no errors)
+kubectl get externalsecret -n munchgo
+kubectl get secret -n munchgo
+
+# Cognito — verify secret injected
+kubectl get secret munchgo-cognito-config -n munchgo -o jsonpath='{.data}' | python3 -c \
+  "import sys,json,base64; d=json.load(sys.stdin); [print(f'{k}: {base64.b64decode(v).decode()}') for k,v in d.items()]"
+
+# Auth service IRSA — verify service account annotation
+kubectl get serviceaccount munchgo-auth-service -n munchgo -o yaml | grep role-arn
+
+# End-to-end: public health check
 export APP_URL=$(terraform -chdir=terraform output -raw application_url)
 curl $APP_URL/healthz
-curl $APP_URL/app1
-curl $APP_URL/app2
-curl -H "Authorization: Bearer <jwt-token>" $APP_URL/api/users
+curl $APP_URL/api/auth/health
+
+# End-to-end: authenticated API call
+./scripts/02-generate-jwt.sh
+curl -H "Authorization: Bearer $ACCESS_TOKEN" $APP_URL/api/orders
 ```
 
-> The `application_url` output returns the CloudFront URL. All requests pass through CloudFront (WAF) → Kong Cloud Gateway → Transit Gateway → Istio Gateway → Backend Pod.
+---
+
+## Observability
+
+### Observability Stack
+
+```mermaid
+graph TB
+    subgraph mesh_services ["MunchGo Services (Istio Ambient)"]
+        SVC[6 Microservices<br/>+ Waypoint Proxy]
+    end
+
+    subgraph obs_stack ["observability namespace"]
+        PROM[Prometheus<br/>Metrics Collection]
+        GRAF[Grafana<br/>Dashboards]
+        JAEGER[Jaeger<br/>Distributed Tracing]
+        KIALI3[Kiali<br/>Service Mesh Topology]
+    end
+
+    SVC -->|Prometheus scrape<br/>:15020/stats/prometheus| PROM
+    SVC -->|OTLP traces<br/>:4317| JAEGER
+    PROM --> GRAF
+    PROM --> KIALI3
+    JAEGER --> KIALI3
+
+    style SVC fill:#2E8B57,color:#fff
+    style PROM fill:#E6522C,color:#fff
+    style GRAF fill:#F46800,color:#fff
+    style JAEGER fill:#60D0E4,color:#000
+    style KIALI3 fill:#003459,color:#fff
+    style mesh_services fill:#F0F0F0,stroke:#BBB,color:#333
+    style obs_stack fill:#F5F5F5,stroke:#CCC,color:#333
+```
+
+| Tool | Access | Purpose |
+|------|--------|---------|
+| **Grafana** | `kubectl port-forward svc/prometheus-stack-grafana -n observability 3000:80` | Metrics dashboards (Istio, K8s, MunchGo) |
+| **Kiali** | `kubectl port-forward svc/kiali -n observability 20001:20001` | Service mesh topology, traffic flow visualization |
+| **Jaeger** | `kubectl port-forward svc/jaeger-query -n observability 16686:16686` | Distributed traces across microservices |
+| **Prometheus** | `kubectl port-forward svc/prometheus-stack-kube-prom-prometheus -n observability 9090:9090` | Raw metrics queries (PromQL) |
 
 ### ArgoCD UI
 
@@ -535,16 +1299,14 @@ kubectl port-forward svc/argocd-server -n argocd 8080:80
 
 ## Konnect UI
 
-Once deployed, everything is visible and configurable at [cloud.konghq.com](https://cloud.konghq.com):
+Once deployed, everything is visible at [cloud.konghq.com](https://cloud.konghq.com):
 
 | Feature | Where in Konnect UI |
 |---------|-------------------|
 | **API Analytics** | Analytics → Dashboard (request counts, latency P50/P95/P99, error rates) |
 | **Gateway Health** | Gateway Manager → Data Plane Nodes (status, connections) |
 | **Routes & Services** | Gateway Manager → Routes / Services |
-| **Plugins** | Gateway Manager → Plugins (JWT, rate limiting, CORS, transforms) |
-| **Consumers** | Gateway Manager → Consumers (API keys, JWT credentials, usage) |
-| **Dev Portal** | Dev Portal → Published APIs (optional) |
+| **Plugins** | Gateway Manager → Plugins (OpenID Connect, rate limiting, CORS, transforms) |
 
 ---
 
@@ -554,18 +1316,43 @@ Once deployed, everything is visible and configurable at [cloud.konghq.com](http
 ./scripts/destroy.sh
 ```
 
-The script tears down the **full stack** in the correct order to avoid orphaned resources:
+Tears down the **full stack** in the correct order:
 
-1. **Delete Istio Gateway** → triggers NLB deprovisioning via AWS LB Controller
+1. **Delete Istio Gateway** → triggers NLB deprovisioning
 2. **Wait for NLB/ENI cleanup** → prevents VPC deletion failures
-3. **Delete ArgoCD apps** → cascade removes Istio components and workloads
-4. **Cleanup CRDs** → removes Gateway API and Istio CRDs (finalizers)
-5. **Delete Konnect resources** → removes control plane, data plane groups, network via API
-6. **Wait for Kong TGW detach** → polls until Kong's VPC attachment is removed from our TGW
-7. **Terraform destroy** → removes EKS, VPC, Transit Gateway, RAM share, CloudFront + WAF
-8. **Cleanup CloudFront CloudFormation stacks** → safety net for orphaned CFN stacks
+3. **Delete ArgoCD apps** → cascade removes all workloads
+4. **Cleanup CRDs** → removes Gateway API and Istio CRDs
+5. **Terraform destroy** → removes EKS, VPC, TGW, RAM, ECR, MSK, RDS, S3, CloudFront + WAF
+6. **Cleanup CloudFormation stacks** → safety net for orphaned CFN
+7. **Delete Konnect resources** → removes Cloud Gateway via API
 
-> **Why this order?** Kong Cloud Gateway creates a VPC attachment to our Transit Gateway from their side. Terraform cannot delete the TGW while this external attachment exists. Deleting Konnect resources first (step 5-6) releases the attachment before terraform runs. The destroy script handles everything — no manual cleanup required. It reads `KONNECT_REGION` and `KONNECT_TOKEN` from `.env`.
+---
+
+## Terraform Variables Reference
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `region` | `ap-southeast-2` | AWS region |
+| `environment` | `poc` | Environment name |
+| `project_name` | `kong-gw` | Project name prefix |
+| `vpc_cidr` | `10.0.0.0/16` | VPC CIDR block |
+| `kubernetes_version` | `1.29` | EKS Kubernetes version |
+| `eks_node_instance_type` | `t3.medium` | System node instance type |
+| `user_node_instance_type` | `t3.medium` | User node instance type |
+| `enable_ecr` | `true` | Create ECR repositories |
+| `enable_msk` | `true` | Create MSK Kafka cluster |
+| `msk_instance_type` | `kafka.m5.large` | MSK broker instance type |
+| `msk_broker_count` | `2` | Number of Kafka brokers |
+| `enable_rds` | `true` | Create RDS PostgreSQL |
+| `rds_instance_class` | `db.t3.medium` | RDS instance class |
+| `rds_multi_az` | `false` | Multi-AZ for production |
+| `enable_spa` | `true` | Create S3 SPA bucket |
+| `enable_external_secrets` | `true` | External Secrets IRSA |
+| `enable_cognito` | `true` | Amazon Cognito User Pool + IRSA |
+| `enable_cloudfront` | `true` | CloudFront + WAF |
+| `kong_cloud_gateway_domain` | `""` | Kong proxy domain (from Konnect) |
+| `enable_waf` | `true` | WAF Web ACL |
+| `waf_rate_limit` | `2000` | Requests per 5 min per IP |
 
 ---
 
@@ -573,18 +1360,13 @@ The script tears down the **full stack** in the correct order to avoid orphaned 
 
 ### CloudFront Origin mTLS — Terraform Workaround
 
-**Problem:** The Terraform AWS provider (as of v6.31) does **not** support `origin_mtls_config` on the `aws_cloudfront_distribution` resource. CloudFront origin mTLS was launched by AWS in January 2026 and is supported via Console, CLI, SDK, CDK, and CloudFormation — but not yet in the Terraform provider.
+**Problem:** The Terraform AWS provider (as of v6.31) does **not** support `origin_mtls_config` on the `aws_cloudfront_distribution` resource.
 
-**Workaround:** The CloudFront distribution is created via `aws_cloudformation_stack` instead of the native `aws_cloudfront_distribution` resource. This allows us to use the CloudFormation `AWS::CloudFront::Distribution` resource which supports `OriginMtlsConfig` with `ClientCertificateArn`. All other resources (WAF Web ACL, OAC, cache policies, response headers policy) remain native Terraform resources and are passed into the CloudFormation stack as parameters.
+**Workaround:** The CloudFront distribution is created via `aws_cloudformation_stack` instead of the native resource, which supports `OriginMtlsConfig` with `ClientCertificateArn`.
 
 See: [`terraform/modules/cloudfront/main.tf`](terraform/modules/cloudfront/main.tf)
 
 **Migration path** (once Terraform provider adds support):
-
-1. Watch [terraform-provider-aws](https://github.com/hashicorp/terraform-provider-aws) for a PR adding `origin_mtls_config` to `aws_cloudfront_distribution`
-2. Replace `aws_cloudformation_stack.cloudfront` with the native `aws_cloudfront_distribution` resource
-3. `terraform state rm` to remove the CloudFormation stack from state
-4. `terraform import` to import the distribution into the new resource
-5. Update `outputs.tf` to reference native resource attributes
-6. `terraform apply` to verify no changes (state matches)
-7. Delete the orphaned CloudFormation stack from the AWS console
+1. Replace `aws_cloudformation_stack.cloudfront` with native `aws_cloudfront_distribution`
+2. `terraform state rm` + `terraform import`
+3. Delete orphaned CloudFormation stack

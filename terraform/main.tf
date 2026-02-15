@@ -106,10 +106,12 @@ module "eks" {
 module "iam" {
   source = "./modules/iam"
 
-  name_prefix       = local.name_prefix
-  oidc_provider_arn = module.eks.oidc_provider_arn
-  oidc_provider_url = module.eks.oidc_provider_url
-  tags              = var.tags
+  name_prefix             = local.name_prefix
+  oidc_provider_arn       = module.eks.oidc_provider_arn
+  oidc_provider_url       = module.eks.oidc_provider_url
+  enable_external_secrets = var.enable_external_secrets
+  enable_cognito          = var.enable_cognito
+  tags                    = var.tags
 }
 
 # AWS Load Balancer Controller - Creates the internal NLB for Istio Gateway
@@ -127,10 +129,14 @@ module "lb_controller" {
   cluster_dependency = module.eks.cluster_name
 }
 
-# Wait for LB Controller to be ready before ArgoCD deploys Istio Gateway
+# Wait for LB Controller webhook endpoints to be ready before ArgoCD
+# deploys apps that create Services (Istio Gateway NLB at sync wave 5).
+# The LB Controller installs a mutating webhook that intercepts all Service
+# creates — if the webhook pods aren't ready, Service creation fails with
+# "no endpoints available for service aws-load-balancer-webhook-service".
 resource "time_sleep" "wait_for_lb_controller" {
   depends_on      = [module.lb_controller]
-  create_duration = "60s"
+  create_duration = "90s"
 }
 
 # ==============================================================================
@@ -221,6 +227,79 @@ resource "aws_security_group_rule" "allow_kong_cloud_gw" {
 }
 
 # ==============================================================================
+# LAYER 1 ADDITIONS: MUNCHGO DATA INFRASTRUCTURE
+# ==============================================================================
+# These resources support the MunchGo microservices platform:
+# - ECR: Container image repositories (CI pushes here, ArgoCD deploys from here)
+# - MSK: Kafka event messaging (Transactional Outbox, Saga orchestration)
+# - RDS: PostgreSQL databases (one instance, 6 databases)
+# - SPA: S3 bucket for React frontend (served via CloudFront)
+
+# ECR Repositories - one per MunchGo microservice
+module "ecr" {
+  count  = var.enable_ecr ? 1 : 0
+  source = "./modules/ecr"
+
+  name_prefix = local.name_prefix
+  tags        = var.tags
+}
+
+# Amazon MSK - Kafka for event-driven microservice communication
+module "msk" {
+  count  = var.enable_msk ? 1 : 0
+  source = "./modules/msk"
+
+  name_prefix                = local.name_prefix
+  vpc_id                     = module.vpc.vpc_id
+  private_subnet_ids         = module.vpc.private_subnet_ids
+  eks_node_security_group_id = module.eks.cluster_security_group_id
+  instance_type              = var.msk_instance_type
+  broker_count               = var.msk_broker_count
+  ebs_volume_size            = var.msk_ebs_volume_size
+  enable_cloudwatch_logs     = true
+  tags                       = var.tags
+}
+
+# Amazon RDS PostgreSQL - shared instance with per-service databases
+module "rds" {
+  count  = var.enable_rds ? 1 : 0
+  source = "./modules/rds"
+
+  name_prefix                = local.name_prefix
+  vpc_id                     = module.vpc.vpc_id
+  private_subnet_ids         = module.vpc.private_subnet_ids
+  eks_node_security_group_id = module.eks.cluster_security_group_id
+  instance_class             = var.rds_instance_class
+  allocated_storage          = var.rds_allocated_storage
+  multi_az                   = var.rds_multi_az
+  tags                       = var.tags
+}
+
+# S3 SPA Bucket - MunchGo React frontend (served via CloudFront OAC)
+module "spa" {
+  count  = var.enable_spa ? 1 : 0
+  source = "./modules/spa"
+
+  name_prefix                = local.name_prefix
+  cloudfront_distribution_arn = var.enable_cloudfront && var.kong_cloud_gateway_domain != "" ? module.cloudfront[0].distribution_arn : ""
+  tags                       = var.tags
+}
+
+# Amazon Cognito - User authentication (replaces custom JWT implementation)
+module "cognito" {
+  count  = var.enable_cognito ? 1 : 0
+  source = "./modules/cognito"
+
+  name_prefix         = local.name_prefix
+  region              = var.region
+  callback_urls       = var.cognito_callback_urls
+  logout_urls         = var.cognito_logout_urls
+  enable_mfa          = var.cognito_enable_mfa
+  deletion_protection = var.cognito_deletion_protection
+  tags                = var.tags
+}
+
+# ==============================================================================
 # LAYER 6: EDGE SECURITY -- CloudFront + WAF
 # ==============================================================================
 # CloudFront + WAF sits in front of Kong's Cloud Gateway proxy URL.
@@ -283,6 +362,11 @@ module "cloudfront" {
   # CloudFront
   price_class = var.cloudfront_price_class
 
+  # S3 SPA Origin (MunchGo React frontend)
+  enable_s3_origin                = var.enable_spa
+  s3_bucket_regional_domain_name = var.enable_spa ? module.spa[0].bucket_regional_domain_name : ""
+  s3_bucket_arn                  = var.enable_spa ? module.spa[0].bucket_arn : ""
+
   tags = var.tags
 }
 
@@ -311,4 +395,10 @@ module "argocd" {
   insecure_mode      = true
   git_repo_url       = var.argocd_git_repo_url
   cluster_dependency = module.eks.cluster_name
+
+  # ArgoCD must wait for the AWS LB Controller to be fully ready.
+  # Without this, ArgoCD sync waves create Services (e.g., Istio Gateway NLB)
+  # that trigger the LB Controller's mutating webhook before its pods are up,
+  # causing "no endpoints available for service" errors.
+  depends_on = [time_sleep.wait_for_lb_controller]
 }
