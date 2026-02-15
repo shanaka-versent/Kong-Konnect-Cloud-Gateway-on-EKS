@@ -54,10 +54,12 @@ resource "aws_iam_role" "spa_deploy" {
       }
       Condition = {
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = [
-            for repo in var.spa_deploy_github_repos :
-            "repo:${repo}:ref:refs/heads/main"
-          ]
+          "token.actions.githubusercontent.com:sub" = flatten([
+            for repo in var.spa_deploy_github_repos : [
+              "repo:${repo}:ref:refs/heads/main",
+              "repo:${repo}:environment:production"
+            ]
+          ])
         }
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
