@@ -70,6 +70,9 @@ read_terraform_outputs() {
     RDS_ORDERS_SECRET=$(terraform output -raw rds_orders_db_secret_name 2>/dev/null || echo "")
     RDS_SAGAS_SECRET=$(terraform output -raw rds_sagas_db_secret_name 2>/dev/null || echo "")
 
+    # MSK (Kafka) bootstrap brokers
+    MSK_BOOTSTRAP_BROKERS=$(terraform output -raw msk_bootstrap_brokers 2>/dev/null || echo "")
+
     # External Secrets IRSA
     EXTERNAL_SECRETS_ROLE_ARN=$(terraform output -raw external_secrets_role_arn 2>/dev/null || echo "")
 
@@ -225,6 +228,88 @@ populate_k8s_overlay() {
 }
 
 # ---------------------------------------------------------------------------
+# Create Kafka config secret from MSK bootstrap brokers
+# ---------------------------------------------------------------------------
+create_kafka_secret() {
+    if [[ -z "$MSK_BOOTSTRAP_BROKERS" ]]; then
+        warn "MSK bootstrap brokers not available — skipping Kafka secret"
+        return
+    fi
+
+    log "Creating munchgo-kafka-config secret..."
+    kubectl create secret generic munchgo-kafka-config \
+        --from-literal=bootstrap_brokers="${MSK_BOOTSTRAP_BROKERS}" \
+        -n munchgo --dry-run=client -o yaml | kubectl apply -f -
+    info "  Kafka bootstrap brokers configured"
+}
+
+# ---------------------------------------------------------------------------
+# Create service databases on RDS
+# ---------------------------------------------------------------------------
+create_service_databases() {
+    log "Creating service databases on RDS..."
+
+    # Wait for munchgo-db-master secret to exist
+    if ! kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
+        warn "munchgo-db-master secret not found — databases will be created on next run"
+        return
+    fi
+
+    kubectl delete job db-init -n munchgo 2>/dev/null || true
+
+    cat <<'EOF' | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-init
+  namespace: munchgo
+spec:
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      containers:
+        - name: psql
+          image: postgres:15-alpine
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef:
+                  name: munchgo-db-master
+                  key: host
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: munchgo-db-master
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: munchgo-db-master
+                  key: password
+            - name: PGDATABASE
+              value: munchgo
+          command: ["sh", "-c"]
+          args:
+            - |
+              for db in auth consumers restaurants couriers orders sagas; do
+                psql -c "CREATE DATABASE $db;" 2>/dev/null && echo "Created: $db" || echo "Exists: $db"
+              done
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+          effect: NoSchedule
+      restartPolicy: Never
+  backoffLimit: 1
+EOF
+
+    # Wait for job to complete
+    kubectl wait --for=condition=complete job/db-init -n munchgo --timeout=120s 2>/dev/null || \
+        warn "DB init job did not complete in time — check: kubectl logs job/db-init -n munchgo"
+
+    info "  Service databases created"
+}
+
+# ---------------------------------------------------------------------------
 # Show next steps
 # ---------------------------------------------------------------------------
 show_next_steps() {
@@ -275,6 +360,8 @@ main() {
     populate_external_secrets
     populate_eso_irsa
     populate_k8s_overlay
+    create_service_databases
+    create_kafka_secret
     show_next_steps
 }
 
