@@ -25,6 +25,7 @@
 
 ---
 # Allow Istio Gateway to reach all MunchGo services (north-south ingress)
+# L7 policy (enforced by waypoint proxy) — controls per-service access
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -47,6 +48,22 @@ spec:
     - kind: Service
       group: ""
       name: munchgo-courier-service
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["istio-ingress"]
+
+---
+# L4 policy (enforced by ztunnel) — allows gateway traffic through the HBONE tunnel
+# In ambient mode, ztunnel enforces L4 policies (no targetRefs).
+# Without this, the ztunnel rejects gateway connections before they reach the waypoint.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-gateway-ingress-l4
+  namespace: munchgo
+spec:
   action: ALLOW
   rules:
     - from:
