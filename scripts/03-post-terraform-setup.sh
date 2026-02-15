@@ -249,10 +249,29 @@ create_kafka_secret() {
 create_service_databases() {
     log "Creating service databases on RDS..."
 
-    # Wait for munchgo-db-master secret to exist
+    # Wait for ExternalSecrets to sync the DB credentials (up to 5 minutes)
+    local MAX_WAIT=300
+    local INTERVAL=10
+    local ELAPSED=0
+
     if ! kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
-        warn "munchgo-db-master secret not found — databases will be created on next run"
-        return
+        log "Waiting for munchgo-db-master secret (ExternalSecrets sync)..."
+        while [[ $ELAPSED -lt $MAX_WAIT ]]; do
+            if kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
+                info "munchgo-db-master secret is ready (waited ${ELAPSED}s)"
+                break
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+            echo -ne "\r  Waiting... ${ELAPSED}s / ${MAX_WAIT}s"
+        done
+        echo ""
+
+        if ! kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
+            warn "munchgo-db-master secret not found after ${MAX_WAIT}s — skipping DB creation"
+            warn "Run manually after ExternalSecrets syncs: ./scripts/03-post-terraform-setup.sh"
+            return
+        fi
     fi
 
     kubectl delete job db-init -n munchgo 2>/dev/null || true

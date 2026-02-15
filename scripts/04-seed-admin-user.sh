@@ -168,10 +168,29 @@ create_cognito_admin() {
 seed_auth_database() {
     log "Seeding admin user in auth-service database..."
 
+    # Wait for ExternalSecrets to sync the DB credentials (up to 5 minutes)
+    local MAX_WAIT=300
+    local INTERVAL=10
+    local ELAPSED=0
+
     if ! kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
-        warn "munchgo-db-master secret not found — skipping DB seed"
-        warn "Run this script again after ExternalSecrets syncs the DB credentials"
-        return
+        log "Waiting for munchgo-db-master secret (ExternalSecrets sync)..."
+        while [[ $ELAPSED -lt $MAX_WAIT ]]; do
+            if kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
+                info "munchgo-db-master secret is ready (waited ${ELAPSED}s)"
+                break
+            fi
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+            echo -ne "\r  Waiting... ${ELAPSED}s / ${MAX_WAIT}s"
+        done
+        echo ""
+
+        if ! kubectl get secret munchgo-db-master -n munchgo &>/dev/null; then
+            warn "munchgo-db-master secret not found after ${MAX_WAIT}s — skipping DB seed"
+            warn "Run manually after ExternalSecrets syncs: ./scripts/04-seed-admin-user.sh"
+            return
+        fi
     fi
 
     # Clean up any previous seed job
