@@ -310,6 +310,19 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Seed default admin user
+# ---------------------------------------------------------------------------
+seed_admin_user() {
+    local SEED_SCRIPT="${SCRIPT_DIR}/04-seed-admin-user.sh"
+    if [[ -f "$SEED_SCRIPT" ]]; then
+        log "Seeding default admin user..."
+        bash "$SEED_SCRIPT" || warn "Admin seed script failed — run manually: ./scripts/04-seed-admin-user.sh"
+    else
+        warn "Admin seed script not found: $SEED_SCRIPT"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Show next steps
 # ---------------------------------------------------------------------------
 show_next_steps() {
@@ -362,6 +375,7 @@ main() {
     populate_k8s_overlay
     create_service_databases
     create_kafka_secret
+    seed_admin_user
     show_next_steps
 }
 

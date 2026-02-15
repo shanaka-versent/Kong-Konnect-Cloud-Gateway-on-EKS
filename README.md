@@ -770,7 +770,46 @@ The frontend is a **React 19 + TypeScript** single-page application served from 
 - Typed API client with automatic Bearer token injection and 401 refresh
 - Custom error responses (403/404 → `index.html`) for SPA client-side routing
 
+**Guest browsing:** Unauthenticated users can browse restaurants and view menus. The order form (delivery address + place order) is only shown to logged-in users — guests see a "Sign in to place your order" prompt with links to login/register.
+
 **Repository:** [`munchgo-spa`](https://github.com/shanaka-versent/munchgo-spa) — deployed via GitHub Actions CI/CD (OIDC → S3 sync → CloudFront invalidation)
+
+### Default Admin User
+
+A default admin user is seeded during deployment (matching the monolith's `admin` / `admin123` pattern, adapted for Cognito password requirements):
+
+| Field | Value |
+|-------|-------|
+| **Email** | `admin@munchgo.com` |
+| **Password** | `Admin@123` |
+| **Role** | `ROLE_ADMIN` |
+
+The admin user is created by `scripts/04-seed-admin-user.sh`, which runs automatically as part of post-terraform setup. It creates the user in both **Cognito** (identity provider) and the **auth-service database** (local user reference).
+
+To create the admin manually (or re-run if needed):
+
+```bash
+./scripts/04-seed-admin-user.sh
+```
+
+### Business Logic — Role-Based Access
+
+| Role | Capabilities |
+|------|-------------|
+| **Guest** (unauthenticated) | Browse restaurants, view menus |
+| **ROLE_CUSTOMER** | All guest capabilities + place orders, view order history, cancel approved orders |
+| **ROLE_RESTAURANT_OWNER** | Approve/reject orders, manage preparation status |
+| **ROLE_COURIER** | View ready pickups, mark pickup/delivery |
+| **ROLE_ADMIN** | View all orders, consumers, restaurants, couriers, users |
+
+**Order lifecycle:**
+
+```
+APPROVAL_PENDING → APPROVED → ACCEPTED → PREPARING → READY_FOR_PICKUP → PICKED_UP → DELIVERED
+                ↓
+            REJECTED
+APPROVED → CANCELLED (customer only)
+```
 
 ---
 
@@ -866,7 +905,8 @@ graph LR
 │   ├── 01-generate-certs.sh        # Generate TLS certs + K8s secret
 │   ├── 02-setup-cloud-gateway.sh   # Fully automated Kong Konnect setup
 │   ├── 02-generate-jwt.sh          # Generate JWT tokens for testing
-│   ├── 03-post-terraform-setup.sh  # Post-apply NLB endpoint discovery
+│   ├── 03-post-terraform-setup.sh  # Post-apply NLB endpoint discovery + admin seed
+│   ├── 04-seed-admin-user.sh       # Seed default admin user (Cognito + auth DB)
 │   └── destroy.sh                  # Full stack teardown (correct order)
 └── terraform/
     ├── main.tf                     # Root module — orchestrates all modules
@@ -1193,6 +1233,8 @@ This script **automatically reads all Terraform outputs** and populates every pl
 | `k8s/external-secrets/munchgo-cognito-secret.yaml` | `PLACEHOLDER-munchgo-cognito` |
 | `k8s/external-secrets/munchgo-db-secret.yaml` | All 7 `PLACEHOLDER-munchgo-*-db` secrets |
 | `munchgo-k8s-config/overlays/dev/auth-service/kustomization.yaml` | `COGNITO_AUTH_SERVICE_ROLE_ARN` |
+
+The script also **seeds the default admin user** (`admin@munchgo.com` / `Admin@123`) in Cognito and the auth-service database. To run it separately: `./scripts/04-seed-admin-user.sh`.
 
 > The script waits for the Istio Gateway NLB to be provisioned before replacing `PLACEHOLDER_NLB_DNS`. If the NLB isn't ready, it skips that placeholder and you can re-run the script later.
 
