@@ -38,38 +38,38 @@ Two AWS accounts are involved. Traffic never touches the public internet between
 ```mermaid
 graph TB
     Client([Client / SPA])
-    CF[CloudFront + WAF<br/>Edge Security + Origin mTLS]
+    CF["CloudFront + WAF<br/>Edge Security + Origin mTLS"]
 
     subgraph kong_acct ["Kong's AWS Account (192.168.0.0/16)"]
-        Kong[Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>OIDC (Cognito) · Rate Limit · CORS · Analytics]
+        Kong["Kong Cloud Gateway<br/>Fully Managed by Konnect<br/>OIDC Cognito · Rate Limit · CORS · Analytics"]
     end
 
-    TGW{{AWS Transit Gateway<br/>Private AWS Backbone}}
+    TGW{{"AWS Transit Gateway<br/>Private AWS Backbone"}}
 
     subgraph your_acct ["Your AWS Account (10.0.0.0/16)"]
         subgraph eks_cluster [EKS Cluster]
             subgraph ns_istio_ing [istio-ingress]
                 NLB[Internal NLB]
-                IGW[Istio Gateway<br/>K8s Gateway API]
+                IGW["Istio Gateway<br/>K8s Gateway API"]
             end
             subgraph ns_munchgo [munchgo namespace — Istio Ambient + Waypoint]
-                AUTH[auth-service<br/>Cognito facade]
+                AUTH["auth-service<br/>Cognito facade"]
                 CONSUMER[consumer-service]
                 RESTAURANT[restaurant-service]
-                ORDER[order-service<br/>CQRS + Events]
+                ORDER["order-service<br/>CQRS + Events"]
                 COURIER[courier-service]
-                SAGA[saga-orchestrator<br/>Saga Pattern]
+                SAGA["saga-orchestrator<br/>Saga Pattern"]
             end
             subgraph ns_gw_health [gateway-health]
                 Health[health-responder]
             end
         end
         subgraph data_services [Managed AWS Data Services]
-            COGNITO[Amazon Cognito<br/>User Pool + OIDC]
-            MSK[Amazon MSK<br/>Kafka 3.6.0]
-            RDS[(Amazon RDS<br/>PostgreSQL 16<br/>6 Databases)]
-            ECR[Amazon ECR<br/>6 Repositories]
-            S3[S3 + CloudFront<br/>React SPA]
+            COGNITO["Amazon Cognito<br/>User Pool + OIDC"]
+            MSK["Amazon MSK<br/>Kafka 3.6.0"]
+            RDS[("Amazon RDS<br/>PostgreSQL 16<br/>6 Databases")]
+            ECR["Amazon ECR<br/>6 Repositories"]
+            S3["S3 + CloudFront<br/>React SPA"]
         end
     end
 
@@ -127,10 +127,10 @@ TLS terminates and re-encrypts at each trust boundary. Traffic is encrypted at e
 ```mermaid
 graph LR
     C([Client]) -->|"TLS 1.3"| CF
-    CF[CloudFront<br/>+ WAF] -->|"HTTPS +<br/>Origin mTLS cert"| Kong
-    Kong[Kong Cloud<br/>Gateway] -->|"HTTPS<br/>via Transit GW"| NLB[Internal<br/>NLB]
-    NLB -->|"TLS"| IGW[Istio Gateway<br/>TLS Terminate]
-    IGW -->|"mTLS<br/>ztunnel L4"| Pod[MunchGo<br/>Service]
+    CF["CloudFront<br/>+ WAF"] -->|"HTTPS +<br/>Origin mTLS cert"| Kong
+    Kong["Kong Cloud<br/>Gateway"] -->|"HTTPS<br/>via Transit GW"| NLB["Internal<br/>NLB"]
+    NLB -->|"TLS"| IGW["Istio Gateway<br/>TLS Terminate"]
+    IGW -->|"mTLS<br/>ztunnel L4"| Pod["MunchGo<br/>Service"]
 
     style C fill:#fff,stroke:#333,color:#333
     style CF fill:#F68D2E,color:#fff
@@ -154,11 +154,11 @@ graph LR
 sequenceDiagram
     participant C as Client / SPA
     participant CF as CloudFront + WAF
-    participant K as Kong Cloud GW<br/>(Kong's AWS Account)
+    participant K as Kong Cloud GW — Kong Account
     participant TGW as Transit Gateway
     participant NLB as Internal NLB
     participant IG as Istio Gateway
-    participant WP as Waypoint Proxy<br/>(L7 AuthZ)
+    participant WP as Waypoint Proxy — L7 AuthZ
     participant App as MunchGo Service
 
     Note over C,CF: TLS Session 1 (Edge)
@@ -202,13 +202,13 @@ graph TB
             SAGA2[saga-orchestrator]
         end
 
-        WP2[Waypoint Proxy<br/>L7 Authorization + Telemetry<br/>gatewayClassName: istio-waypoint]
+        WP2["Waypoint Proxy<br/>L7 Authorization + Telemetry<br/>gatewayClassName: istio-waypoint"]
     end
 
     subgraph control ["Istio Control Plane (istio-system)"]
-        ISTIOD[istiod<br/>Config Distribution]
-        CNI[istio-cni<br/>Network Rules]
-        ZT[ztunnel<br/>L4 mTLS DaemonSet]
+        ISTIOD["istiod<br/>Config Distribution"]
+        CNI["istio-cni<br/>Network Rules"]
+        ZT["ztunnel<br/>L4 mTLS DaemonSet"]
     end
 
     ISTIOD -->|xDS Config| WP2
@@ -263,7 +263,7 @@ graph TB
     end
 
     subgraph external_ew ["External (outside mesh)"]
-        KAFKA_EW[Amazon MSK<br/>Kafka]
+        KAFKA_EW["Amazon MSK<br/>Kafka"]
     end
 
     SAGA_EW -->|"HTTP GET /api/v1/consumers/{id}<br/>ztunnel mTLS → Waypoint L7 → ztunnel"| CONSUMER_EW
@@ -343,31 +343,31 @@ graph TB
                         gw_pod[Istio Gateway Pod]
                     end
                     subgraph ns_munchgo2 ["munchgo"]
-                        services_n[6 MunchGo Services<br/>All ClusterIP :8080]
+                        services_n["6 MunchGo Services<br/>All ClusterIP :8080"]
                     end
                 end
-                INLB[Internal NLB<br/>Created by Istio Gateway<br/>+ AWS LB Controller]
+                INLB["Internal NLB<br/>Created by Istio Gateway<br/>+ AWS LB Controller"]
             end
-            TGW_Y[Transit Gateway<br/>Created by Terraform<br/>Shared to Kong via AWS RAM]
+            TGW_Y["Transit Gateway<br/>Created by Terraform<br/>Shared to Kong via AWS RAM"]
             RT_Y[Route: 192.168.0.0/16 → TGW]
-            SG_Y[SG: Allow inbound<br/>from 192.168.0.0/16]
+            SG_Y["SG: Allow inbound<br/>from 192.168.0.0/16"]
         end
-        MSK2[Amazon MSK<br/>Private Subnets]
-        RDS2[Amazon RDS<br/>Private Subnets]
+        MSK2["Amazon MSK<br/>Private Subnets"]
+        RDS2["Amazon RDS<br/>Private Subnets"]
     end
 
     subgraph kong_acct2 ["Kong's AWS Account"]
         subgraph KVPC ["DCGW VPC (192.168.0.0/16)"]
-            KDP[Kong Data Plane Pods<br/>Auto-scaled · Fully Managed]
-            KNLB[Kong Cloud GW NLB<br/>Public · Internet-Facing]
-            TGW_K[Transit Gateway Attachment<br/>Kong attaches their VPC]
+            KDP["Kong Data Plane Pods<br/>Auto-scaled · Fully Managed"]
+            KNLB["Kong Cloud GW NLB<br/>Public · Internet-Facing"]
+            TGW_K["Transit Gateway Attachment<br/>Kong attaches their VPC"]
             RT_K[Route: 10.0.0.0/16 → TGW]
         end
     end
 
     gw_pod --> INLB
     INLB --- TGW_Y
-    TGW_Y <-->|AWS Private Backbone<br/>No Public Internet| TGW_K
+    TGW_Y <-->|"AWS Private Backbone<br/>No Public Internet"| TGW_K
 
     style TGW_Y fill:#232F3E,color:#fff
     style TGW_K fill:#232F3E,color:#fff
@@ -421,24 +421,24 @@ The platform uses two distinct communication patterns: **north-south** traffic e
 ```mermaid
 graph TB
     subgraph external ["North-South Traffic (Kong → Istio Gateway)"]
-        KONG[Kong Cloud Gateway<br/>OIDC (Cognito) Auth]
+        KONG["Kong Cloud Gateway<br/>OIDC Cognito Auth"]
     end
 
     subgraph munchgo_ns ["munchgo namespace (Istio Ambient mTLS)"]
-        AUTH3[auth-service<br/>:8080<br/>Cognito Facade]
-        CONSUMER3[consumer-service<br/>:8080<br/>Customer Profiles]
-        RESTAURANT3[restaurant-service<br/>:8080<br/>Menus & Items]
-        ORDER3[order-service<br/>:8080<br/>CQRS + Event Sourcing]
-        COURIER3[courier-service<br/>:8080<br/>Delivery Assignments]
-        SAGA3[saga-orchestrator<br/>:8080<br/>Saga Coordination]
+        AUTH3["auth-service<br/>:8080<br/>Cognito Facade"]
+        CONSUMER3["consumer-service<br/>:8080<br/>Customer Profiles"]
+        RESTAURANT3["restaurant-service<br/>:8080<br/>Menus & Items"]
+        ORDER3["order-service<br/>:8080<br/>CQRS + Event Sourcing"]
+        COURIER3["courier-service<br/>:8080<br/>Delivery Assignments"]
+        SAGA3["saga-orchestrator<br/>:8080<br/>Saga Coordination"]
     end
 
     subgraph messaging ["Async Messaging (external to mesh)"]
-        KAFKA[Amazon MSK<br/>Kafka 3.6.0]
+        KAFKA["Amazon MSK<br/>Kafka 3.6.0"]
     end
 
     subgraph storage ["Persistent Storage"]
-        DB[(Amazon RDS PostgreSQL 16<br/>Shared Instance · 6 Databases)]
+        DB[("Amazon RDS PostgreSQL 16<br/>Shared Instance · 6 Databases")]
     end
 
     KONG -->|/api/auth — Public| AUTH3
@@ -819,7 +819,7 @@ APPROVED → CANCELLED (customer only)
 
 ```mermaid
 graph LR
-    subgraph infra ["Kong-Konnect-Cloud-Gateway-on-EKS<br/>(This Repo)"]
+    subgraph infra ["Kong-Konnect-Cloud-Gateway-on-EKS — This Repo"]
         TF[Terraform Modules]
         K8S[K8s Manifests]
         ARGO[ArgoCD Apps]
@@ -827,20 +827,20 @@ graph LR
         SCRIPTS[Setup Scripts]
     end
 
-    subgraph gitops ["munchgo-k8s-config<br/>(GitOps Repo)"]
-        BASE[Kustomize Base<br/>6 Services]
-        OVL[Kustomize Overlays<br/>dev / staging / prod]
-        APPS[ArgoCD Applications<br/>Per-Service]
+    subgraph gitops ["munchgo-k8s-config — GitOps Repo"]
+        BASE["Kustomize Base<br/>6 Services"]
+        OVL["Kustomize Overlays<br/>dev / staging / prod"]
+        APPS["ArgoCD Applications<br/>Per-Service"]
     end
 
-    subgraph micro ["munchgo-microservices<br/>(Source Code)"]
-        SRC[Java 21 Spring Boot<br/>6 Microservices]
-        CI[GitHub Actions CI<br/>Build → Jib → ECR]
+    subgraph micro ["munchgo-microservices — Source Code"]
+        SRC["Java 21 Spring Boot<br/>6 Microservices"]
+        CI["GitHub Actions CI<br/>Build → Jib → ECR"]
     end
 
-    subgraph spa_repo ["munchgo-spa<br/>(Frontend)"]
-        SPA_SRC[React 19 + TypeScript<br/>Vite + Tailwind CSS]
-        SPA_CI[GitHub Actions CI<br/>Build → S3 → CloudFront]
+    subgraph spa_repo ["munchgo-spa — Frontend"]
+        SPA_SRC["React 19 + TypeScript<br/>Vite + Tailwind CSS"]
+        SPA_CI["GitHub Actions CI<br/>Build → S3 → CloudFront"]
     end
 
     CI -->|"kustomize edit set image"| OVL
@@ -935,12 +935,12 @@ graph LR
 
 ```mermaid
 graph LR
-    DEV[Developer] -->|git push| MICRO[munchgo-microservices<br/>GitHub]
-    MICRO -->|GitHub Actions| BUILD[Build<br/>Java 21 + Jib]
-    BUILD -->|Push Image| ECR[Amazon ECR<br/>:git-sha]
-    BUILD -->|kustomize edit<br/>set image| GITOPS[munchgo-k8s-config<br/>GitHub]
-    GITOPS -->|ArgoCD watches| ARGO[ArgoCD<br/>Auto-Sync]
-    ARGO -->|kubectl apply| EKS[EKS Cluster<br/>munchgo namespace]
+    DEV[Developer] -->|git push| MICRO["munchgo-microservices<br/>GitHub"]
+    MICRO -->|GitHub Actions| BUILD["Build<br/>Java 21 + Jib"]
+    BUILD -->|Push Image| ECR["Amazon ECR<br/>:git-sha"]
+    BUILD -->|"kustomize edit<br/>set image"| GITOPS["munchgo-k8s-config<br/>GitHub"]
+    GITOPS -->|ArgoCD watches| ARGO["ArgoCD<br/>Auto-Sync"]
+    ARGO -->|kubectl apply| EKS["EKS Cluster<br/>munchgo namespace"]
 
     style DEV fill:#fff,stroke:#333,color:#333
     style MICRO fill:#24292E,color:#fff
@@ -961,10 +961,10 @@ graph LR
 
 ```mermaid
 graph LR
-    DEV2[Developer] -->|git push| SPA_REPO[munchgo-spa<br/>GitHub]
-    SPA_REPO -->|GitHub Actions| BUILD2[Build<br/>npm ci + vite build]
-    BUILD2 -->|aws s3 sync| S3_2[S3 SPA Bucket<br/>index.html + hashed assets]
-    BUILD2 -->|create-invalidation| CF2[CloudFront<br/>Cache Invalidation]
+    DEV2[Developer] -->|git push| SPA_REPO["munchgo-spa<br/>GitHub"]
+    SPA_REPO -->|GitHub Actions| BUILD2["Build<br/>npm ci + vite build"]
+    BUILD2 -->|aws s3 sync| S3_2["S3 SPA Bucket<br/>index.html + hashed assets"]
+    BUILD2 -->|create-invalidation| CF2["CloudFront<br/>Cache Invalidation"]
 
     style DEV2 fill:#fff,stroke:#333,color:#333
     style SPA_REPO fill:#24292E,color:#fff
@@ -1032,7 +1032,7 @@ System nodes handle critical add-ons (tainted with `CriticalAddonsOnly`), while 
 ```mermaid
 flowchart TB
     subgraph EKS["EKS Cluster"]
-        subgraph SystemPool["System Node Pool<br/>(Taint: CriticalAddonsOnly)"]
+        subgraph SystemPool["System Node Pool — Taint: CriticalAddonsOnly"]
             subgraph KS["kube-system"]
                 LBC2[aws-lb-controller]
                 CoreDNS[coredns]
@@ -1119,25 +1119,25 @@ graph TB
 
     subgraph L3 ["Layer 3: EKS Customizations — ArgoCD (this repo)"]
         CRDs2[Gateway API CRDs]
-        Istio2[Istio Ambient<br/>base · istiod · cni · ztunnel]
-        GW3[Istio Gateway<br/>Single Internal NLB]
+        Istio2["Istio Ambient<br/>base · istiod · cni · ztunnel"]
+        GW3["Istio Gateway<br/>Single Internal NLB"]
         Routes2[HTTPRoutes + ReferenceGrants]
         ESO[External Secrets Operator]
-        MeshPol[Mesh Policies<br/>Waypoint · AuthZ · mTLS]
+        MeshPol["Mesh Policies<br/>Waypoint · AuthZ · mTLS"]
         HealthApp[health-responder]
-        BRIDGE[09-munchgo-apps<br/>Layer 3→4 Bridge]
+        BRIDGE["09-munchgo-apps<br/>Layer 3→4 Bridge"]
     end
 
     subgraph L4 ["Layer 4: Applications — ArgoCD (munchgo-k8s-config repo)"]
-        MunchGoApps[MunchGo Services<br/>6 ArgoCD Apps · Kustomize overlays<br/>CI auto-updates image tags]
+        MunchGoApps["MunchGo Services<br/>6 ArgoCD Apps · Kustomize overlays<br/>CI auto-updates image tags"]
     end
 
     subgraph L5 ["Layer 5: API Config — Kong Konnect"]
-        KongGW2[Kong Cloud Gateway<br/>OIDC (Cognito) · Rate Limit · CORS<br/>Connects via Transit Gateway]
+        KongGW2["Kong Cloud Gateway<br/>OIDC Cognito · Rate Limit · CORS<br/>Connects via Transit Gateway"]
     end
 
     subgraph L6 ["Layer 6: Edge Security — Terraform"]
-        CFront2[CloudFront + WAF<br/>Origin mTLS + S3 SPA Origin]
+        CFront2["CloudFront + WAF<br/>Origin mTLS + S3 SPA Origin"]
     end
 
     VPC --> EKS2
@@ -1356,18 +1356,18 @@ curl -H "Authorization: Bearer $ACCESS_TOKEN" $APP_URL/api/orders
 ```mermaid
 graph TB
     subgraph mesh_services ["MunchGo Services (Istio Ambient)"]
-        SVC[6 Microservices<br/>+ Waypoint Proxy]
+        SVC["6 Microservices<br/>+ Waypoint Proxy"]
     end
 
     subgraph obs_stack ["observability namespace"]
-        PROM[Prometheus<br/>Metrics Collection]
-        GRAF[Grafana<br/>Dashboards]
-        JAEGER[Jaeger<br/>Distributed Tracing]
-        KIALI3[Kiali<br/>Service Mesh Topology]
+        PROM["Prometheus<br/>Metrics Collection"]
+        GRAF["Grafana<br/>Dashboards"]
+        JAEGER["Jaeger<br/>Distributed Tracing"]
+        KIALI3["Kiali<br/>Service Mesh Topology"]
     end
 
-    SVC -->|Prometheus scrape<br/>:15020/stats/prometheus| PROM
-    SVC -->|OTLP traces<br/>:4317| JAEGER
+    SVC -->|"Prometheus scrape<br/>:15020/stats/prometheus"| PROM
+    SVC -->|"OTLP traces<br/>:4317"| JAEGER
     PROM --> GRAF
     PROM --> KIALI3
     JAEGER --> KIALI3
