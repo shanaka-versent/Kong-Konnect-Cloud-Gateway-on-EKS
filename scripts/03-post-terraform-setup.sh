@@ -21,7 +21,7 @@ REPO_DIR="${SCRIPT_DIR}/.."
 TERRAFORM_DIR="${REPO_DIR}/terraform"
 
 # K8s config repo (relative to infra repo)
-K8S_CONFIG_REPO="${REPO_DIR}/../../../Modernisation/Java-demo/munchgo-k8s-config"
+K8S_CONFIG_REPO="${REPO_DIR}/../../Modernisation/Java-demo/munchgo-k8s-config"
 
 # Auto-source .env if it exists (contains KONNECT_TOKEN etc.)
 ENV_FILE="${REPO_DIR}/.env"
@@ -72,6 +72,9 @@ read_terraform_outputs() {
 
     # External Secrets IRSA
     EXTERNAL_SECRETS_ROLE_ARN=$(terraform output -raw external_secrets_role_arn 2>/dev/null || echo "")
+
+    # AWS Account ID (extracted from ECR repository URL)
+    AWS_ACCOUNT_ID=$(terraform output -json ecr_repository_urls 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(list(d.values())[0].split('.')[0])" 2>/dev/null || echo "")
 
     # CloudFront URL
     APP_URL=$(terraform output -raw application_url 2>/dev/null || echo "")
@@ -198,13 +201,23 @@ populate_eso_irsa() {
 # ---------------------------------------------------------------------------
 populate_k8s_overlay() {
     if [[ ! -d "$K8S_CONFIG_REPO" ]]; then
-        warn "munchgo-k8s-config repo not found at ${K8S_CONFIG_REPO}, skipping IRSA patch"
+        warn "munchgo-k8s-config repo not found at ${K8S_CONFIG_REPO}, skipping overlay patches"
         return
     fi
 
+    log "Populating munchgo-k8s-config overlays..."
+
+    # Replace ACCOUNT_ID placeholder with actual AWS account ID in all dev overlays
+    if [[ -n "$AWS_ACCOUNT_ID" ]]; then
+        find "${K8S_CONFIG_REPO}/overlays/dev" -name 'kustomization.yaml' -exec \
+            sed -i.bak "s|ACCOUNT_ID|${AWS_ACCOUNT_ID}|g" {} +
+        find "${K8S_CONFIG_REPO}/overlays/dev" -name '*.bak' -delete
+        info "  ECR account ID → ${AWS_ACCOUNT_ID}"
+    fi
+
+    # Replace Cognito IRSA role ARN in auth-service overlay
     local AUTH_OVERLAY="${K8S_CONFIG_REPO}/overlays/dev/auth-service/kustomization.yaml"
     if [[ -f "$AUTH_OVERLAY" && -n "$COGNITO_AUTH_ROLE_ARN" ]]; then
-        log "Populating IRSA role ARN in K8s overlay..."
         sed -i.bak "s|COGNITO_AUTH_SERVICE_ROLE_ARN|${COGNITO_AUTH_ROLE_ARN}|g" "$AUTH_OVERLAY"
         info "  auth-service IRSA → ${COGNITO_AUTH_ROLE_ARN}"
         rm -f "${AUTH_OVERLAY}.bak"
