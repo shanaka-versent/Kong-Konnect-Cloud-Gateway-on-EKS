@@ -70,6 +70,9 @@ read_terraform_outputs() {
     RDS_ORDERS_SECRET=$(terraform output -raw rds_orders_db_secret_name 2>/dev/null || echo "")
     RDS_SAGAS_SECRET=$(terraform output -raw rds_sagas_db_secret_name 2>/dev/null || echo "")
 
+    # External Secrets IRSA
+    EXTERNAL_SECRETS_ROLE_ARN=$(terraform output -raw external_secrets_role_arn 2>/dev/null || echo "")
+
     # CloudFront URL
     APP_URL=$(terraform output -raw application_url 2>/dev/null || echo "")
 
@@ -178,6 +181,19 @@ populate_external_secrets() {
 }
 
 # ---------------------------------------------------------------------------
+# Populate External Secrets Operator IRSA role ARN
+# ---------------------------------------------------------------------------
+populate_eso_irsa() {
+    local ESO_APP="${REPO_DIR}/argocd/apps/09-external-secrets.yaml"
+    if [[ -f "$ESO_APP" && -n "$EXTERNAL_SECRETS_ROLE_ARN" ]]; then
+        log "Populating External Secrets IRSA role ARN..."
+        sed -i.bak "s|PLACEHOLDER_EXTERNAL_SECRETS_ROLE_ARN|${EXTERNAL_SECRETS_ROLE_ARN}|g" "$ESO_APP"
+        info "  ESO IRSA → ${EXTERNAL_SECRETS_ROLE_ARN}"
+        rm -f "${ESO_APP}.bak"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Populate K8s config overlay (IRSA role ARN)
 # ---------------------------------------------------------------------------
 populate_k8s_overlay() {
@@ -244,6 +260,7 @@ main() {
     get_gateway_endpoint
     populate_kong_yaml
     populate_external_secrets
+    populate_eso_irsa
     populate_k8s_overlay
     show_next_steps
 }
