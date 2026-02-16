@@ -1,6 +1,8 @@
-# Kong Dedicated Cloud Gateway on EKS — MunchGo Microservices Platform
+# Modernized MunchGo App Deployment on Kong Dedicated Cloud Gateway on EKS with Istio (Ambient Mesh)
 
-Kong Konnect Dedicated Cloud Gateway with **MunchGo microservices** on AWS EKS. Kong's API gateway runs **externally in Kong's AWS account** — fully managed, with **Amazon Cognito** authentication (OpenID Connect), rate limiting, CORS, and analytics via the [Konnect UI](https://cloud.konghq.com). Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** adds automatic L4 mTLS between all pods — no sidecars needed. L7 observability via **waypoint proxies**.
+This is the platform for deploying the **modernized MunchGo application** — decomposed from the [MunchGo monolith](https://github.com/shanaka-versent/munchgo-monolith) into [6 Spring Boot microservices](https://github.com/shanaka-versent/munchgo-microservices) with a [React SPA](https://github.com/shanaka-versent/munchgo-spa) frontend. The platform is built on the pattern described in [Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)](https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS/tree/feature/basic-demo).
+
+Kong's API gateway runs **externally in Kong's AWS account** — fully managed via the [Konnect UI](https://cloud.konghq.com), with **Amazon Cognito** OIDC authentication, rate limiting, CORS, and analytics. Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** provides automatic L4 mTLS between all pods — no sidecars needed — with L7 authorization and observability via **waypoint proxies**.
 
 **CloudFront + WAF** is mandatory — Kong Cloud Gateway has a public-facing NLB that must be protected. All client traffic passes through CloudFront for WAF inspection (DDoS, SQLi/XSS, rate limiting, geo-blocking) before reaching Kong. Origin mTLS prevents direct access to Kong Cloud Gateway, ensuring nobody can bypass WAF.
 
