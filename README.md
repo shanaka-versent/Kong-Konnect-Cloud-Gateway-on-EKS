@@ -1,12 +1,12 @@
-# Modernized MunchGo App Deployment on Kong Dedicated Cloud Gateway on EKS with Istio (Ambient Mesh)
+# MunchGo — Monolith to Microservices on AWS
 
-This is the platform for deploying the **modernized MunchGo application** — decomposed from the [MunchGo monolith](https://github.com/shanaka-versent/munchgo-monolith) into [6 Spring Boot microservices](https://github.com/shanaka-versent/munchgo-microservices) with a [React SPA](https://github.com/shanaka-versent/munchgo-spa) frontend. The platform is built on the pattern described in [Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)](https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS/tree/feature/basic-demo).
+Production deployment of the modernized **MunchGo food-delivery application** on AWS. The [MunchGo monolith](https://github.com/shanaka-versent/munchgo-monolith) has been decomposed into [6 Spring Boot microservices](https://github.com/shanaka-versent/munchgo-microservices) (auth, consumer, restaurant, order, courier, saga-orchestrator) with a [React SPA](https://github.com/shanaka-versent/munchgo-spa) replacing the Thymeleaf frontend.
 
-Kong's API gateway runs **externally in Kong's AWS account** — fully managed via the [Konnect UI](https://cloud.konghq.com), with **Amazon Cognito** OIDC authentication, rate limiting, CORS, and analytics. Backend services in EKS sit behind a **single Istio Gateway internal NLB**, connected to Kong via **AWS Transit Gateway** over private networking. **Istio Ambient mesh** provides automatic L4 mTLS between all pods — no sidecars needed — with L7 authorization and observability via **waypoint proxies**.
+**Microservices** run on **Amazon EKS** with **Istio Ambient Mesh** for automatic mTLS and L7 authorization — no sidecars. APIs are exposed through **Kong Dedicated Cloud Gateway** (fully managed in Kong's AWS account, connected via Transit Gateway) and protected by **Amazon CloudFront + WAF** with origin mTLS. Authentication is handled by **Amazon Cognito** (OIDC) validated at the Kong gateway layer — microservices receive pre-validated identity headers with zero token logic.
 
-**CloudFront + WAF** is mandatory — Kong Cloud Gateway has a public-facing NLB that must be protected. All client traffic passes through CloudFront for WAF inspection (DDoS, SQLi/XSS, rate limiting, geo-blocking) before reaching Kong. Origin mTLS prevents direct access to Kong Cloud Gateway, ensuring nobody can bypass WAF.
+**The SPA** is deployed to **Amazon S3** and served securely through the same **CloudFront distribution** with WAF protection — hashed assets get immutable caching while `index.html` is always fresh.
 
-The entire stack deploys with **zero manual steps** — Terraform provisions infrastructure, ArgoCD syncs K8s resources via GitOps, and scripts handle Konnect API setup including RAM sharing and TGW attachment.
+The underlying platform pattern — Kong Cloud Gateway, EKS, Istio Gateway API, Transit Gateway private networking, CloudFront + WAF, and the full deployment automation — is documented in the [Kong Dedicated Cloud Gateway on EKS with Istio Gateway API (Ambient Mesh)](https://github.com/shanaka-versent/Kong-Konnect-Cloud-Gateway-on-EKS/tree/feature/basic-demo) branch. **This README focuses on what's built on top**: the MunchGo application, Cognito authentication, event-driven sagas, and the CI/CD pipelines.
 
 ---
 
