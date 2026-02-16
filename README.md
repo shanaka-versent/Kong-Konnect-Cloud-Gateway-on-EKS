@@ -1,4 +1,4 @@
-# MunchGo — Monolith to Microservices on AWS
+# MunchGo IaC — Monolith to Microservices on AWS
 
 This is the **Infrastructure as Code (IaC) repository** for deploying the modernized **MunchGo food-delivery application** on AWS. The [MunchGo monolith](https://github.com/shanaka-versent/munchgo-monolith) has been decomposed into [6 Spring Boot microservices](https://github.com/shanaka-versent/munchgo-microservices) (auth, consumer, restaurant, order, courier, saga-orchestrator) with a [React SPA](https://github.com/shanaka-versent/munchgo-spa) replacing the Thymeleaf frontend. This repo contains the Terraform modules, Kubernetes manifests, ArgoCD applications, Kong gateway configuration, and automation scripts to provision and wire everything together.
 
